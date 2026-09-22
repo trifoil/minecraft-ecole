@@ -1,0 +1,10 @@
+# Never commit student credentials.
+secrets/
+comptes-eleves.*
+*.csv
+.env
+
+# Local test data
+data/
+crafty/
+backups/
