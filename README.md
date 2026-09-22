@@ -348,6 +348,33 @@ mcadmin console "authme reload"
 
 ## 11. Troubleshooting
 
+**The script stops with "error from registry: denied".**
+
+Pelican moved its images from the `pelican-dev` namespace to `pelican`. A
+registry does not redirect a namespace, so an old name gives `denied`. Test
+the two names:
+
+```bash
+sudo docker pull ghcr.io/pelican/panel:latest
+sudo docker pull ghcr.io/pelican-dev/panel:latest
+```
+
+Run the script again with the name that works:
+
+```bash
+sudo PANEL_IMAGE=ghcr.io/pelican/panel:latest bash install.sh
+```
+
+If both names fail, `ghcr.io` is blocked. Test it:
+
+```bash
+curl -sSI https://ghcr.io/v2/ | head -1
+```
+
+A line with `401` is correct: the registry answers, and it asks for a token.
+No answer means that a filter blocks the host. Ask the network administrator
+to allow `ghcr.io`. The game servers also need it, for the Java images.
+
 **The script stops at the migrations.**
 Read `/opt/minecraft-ecole/migrate.log`. A common cause is no network in the
 panel container. See the DNS part below.

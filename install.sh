@@ -732,9 +732,13 @@ configure_panel() {
     panel_set_env APP_TIMEZONE "$TZ_NAME"
     panel_set_env APP_LOCALE "fr"
     panel_set_env DB_CONNECTION "sqlite"
-    panel_set_env CACHE_STORE "database"
+    # The cache and the session use files, not the database.
+    # The panel reads the cache while it starts. With "database", that read
+    # happens before the migration makes the "cache" table, and the
+    # migration fails with "no such table: cache".
+    panel_set_env CACHE_STORE "file"
+    panel_set_env SESSION_DRIVER "file"
     panel_set_env QUEUE_CONNECTION "database"
-    panel_set_env SESSION_DRIVER "database"
     panel_set_env PANEL_USE_BINARY_PREFIX "true"
 
     # The school has no mail server. Write the mails to the log, and do not
@@ -748,8 +752,22 @@ configure_panel() {
     pexec sh -c 'mkdir -p /pelican-data/database && touch /pelican-data/database/database.sqlite'
 
     log "Run the database migrations. This step takes some minutes."
-    if ! pexec php artisan migrate --seed --force > "$INSTALL_DIR/migrate.log" 2>&1; then
+    # CACHE_STORE and QUEUE_CONNECTION are forced for this one command. Their
+    # tables do not exist yet.
+    if ! docker exec -i \
+            -e CACHE_STORE=file \
+            -e SESSION_DRIVER=file \
+            -e QUEUE_CONNECTION=sync \
+            "$PANEL_CONTAINER" php artisan migrate --seed --force \
+            > "$INSTALL_DIR/migrate.log" 2>&1; then
         tail -25 "$INSTALL_DIR/migrate.log" >&2
+        cat >&2 <<EOF
+
+ If the database is in a bad state, clean it and start again:
+   cd $INSTALL_DIR && sudo docker compose down -v && sudo bash install.sh
+ This deletes the panel database only. The account list is kept.
+
+EOF
         die "The migrations failed. The full log is in $INSTALL_DIR/migrate.log"
     fi
     ok "The database is ready."
