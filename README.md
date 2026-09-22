@@ -1,80 +1,179 @@
 # minecraft-ecole
 
-A one-command installer for a Minecraft server on a school LAN.
+An installer for a school game-server machine on Debian.
 
-The clients are not official, so the server runs in **offline mode**. The
-**AuthMeReloaded** plugin gives the protection: a player who joins cannot move,
-cannot chat and cannot touch the world. The player must first type a login
-command in the chat. After the login, the player can play.
+The panel is **Pelican Panel**, with the **Wings** daemon. Each game server
+runs in its own Docker container. You make servers, install plugins, mods and
+modpacks, and read the console from a web page.
+
+The clients are not official, so the Minecraft server runs in **offline mode**.
+The **AuthMeReloaded** plugin gives the protection: a player who joins cannot
+move, cannot chat and cannot touch the world. The player must first type a
+login command in the chat.
 
 ---
 
-## 1. What the script installs
+## 1. Why Pelican and not Pterodactyl
+
+Pterodactyl had no release after **v1.15.1 of August 2024**. Pelican Panel is
+the active fork, made by former Pterodactyl developers. It has the same
+architecture, it reads Pterodactyl **eggs**, and it gets security patches.
+
+The Wings daemon is at **v1.0.0-beta29**. It is a beta, but it is the version
+that Pelican ships and that people use in production. Make backups.
+
+---
+
+## 2. What the script installs
 
 | Component | Purpose | Port |
 |---|---|---|
 | Docker CE + Compose plugin | Container runtime | — |
-| Paper 1.21.11 (`itzg/minecraft-server`) | The Minecraft server | 25565/tcp |
-| AuthMeReloaded 6.x | Login by chat command | — |
-| Crafty Controller 4 | Web panel for Minecraft servers | 8443/tcp |
-| Portainer CE | Web panel for the containers | 9443/tcp |
+| Pelican Panel (container) | Web panel: servers, console, files, users | 80, 443 |
+| Pelican Wings (systemd) | Daemon that runs each game server | 8080, 2022 |
+| Portainer CE (container) | Web panel for the containers | 9443 |
 | `mcadmin` | Command-line tool for the teacher | — |
 
 The script also makes 50 accounts (`eleve01` … `eleve50`) with random
 passwords, and writes them to a CSV file and to printable slips.
 
+The Minecraft server itself is **not** in the script. You make it in the
+panel, because that is what gives you plugins, mods and modpacks later.
+
 ---
 
-## 2. Requirements
+## 3. Requirements
 
 - A stock Debian server (Debian 12 or Debian 13), 64-bit.
 - Root access.
-- 4 GB RAM or more for the Minecraft server, plus 1 GB for the panels.
-- An internet connection for the installation only. The lessons can be offline.
+- 6 GB RAM or more: 4 GB for the game server, the rest for the panel.
+- 20 GB free disk or more. A modpack can use 5 GB.
+- An internet connection for the installation. The lessons can be offline.
 
 ---
 
-## 3. Installation
+## 4. Installation
 
 ```bash
 sudo bash install.sh
 ```
 
-The first start downloads the images and builds the world. This step takes
-5 to 15 minutes. Do not stop the script.
+The script does the automatic part. It then prints four steps that you do in
+the browser. Part 5 explains those steps.
 
 ### Change the defaults
 
-Give the values on the command line:
-
 ```bash
-sudo MC_MEMORY=6G ACCOUNT_COUNT=30 ACCOUNT_PREFIX=etud bash install.sh
+sudo ACCOUNT_COUNT=30 PANEL_URL=http://10.0.0.20 bash install.sh
 ```
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `INSTALL_DIR` | `/opt/minecraft-ecole` | Where the stack is installed |
-| `MC_VERSION` | `1.21.11` | Paper version |
-| `MC_MEMORY` | `4G` | Java heap |
-| `MC_PORT` | `25565` | Minecraft port |
-| `MAX_PLAYERS` | `60` | Maximum players |
+| `PANEL_URL` | `http://<server-ip>` | The URL of the panel |
+| `ADMIN_EMAIL` | `admin@ecole.local` | Used by the panel for certificates |
+| `PANEL_HTTP_PORT` | `80` | Panel, HTTP |
+| `PANEL_HTTPS_PORT` | `443` | Panel, HTTPS |
+| `WINGS_PORT` | `8080` | Daemon port |
+| `WINGS_SFTP_PORT` | `2022` | SFTP port of the daemon |
+| `MC_PORT` | `25565` | Game port |
+| `RCON_PORT` | `25575` | Console port |
+| `MC_VERSION` | `1.21.11` | Used by `mcadmin prepare` |
 | `ACCOUNT_COUNT` | `50` | Number of student accounts |
 | `ACCOUNT_PREFIX` | `eleve` | Start of each pseudo |
-| `PASSWORD_LENGTH` | `10` | Password length |
-| `CRAFTY_PORT` | `8443` | Crafty web panel |
-| `PORTAINER_PORT` | `9443` | Portainer web panel |
-| `ENABLE_WHITELIST` | `false` | Second lock (see part 7) |
-| `SETUP_FIREWALL` | `no` | Set to `yes` to configure `ufw` |
-| `SKIP_DOCKER_INSTALL` | `no` | Set to `yes` if Docker is present |
+| `PORTAINER_PORT` | `9443` | Portainer |
+| `INSTALL_PORTAINER` | `yes` | `no` skips Portainer |
+| `SETUP_FIREWALL` | `no` | `yes` configures `ufw` |
+| `REMOVE_OLD_STACK` | `yes` | Replaces an old Crafty stack |
 
 > **Caution:** `SETUP_FIREWALL=yes` enables `ufw`. The script opens port 22
 > first. If you use a different SSH port, open it before you run the script.
 
+> If an old Crafty stack is in `INSTALL_DIR`, the script stops it and moves
+> the folder to `INSTALL_DIR.old-<date>`. The account list is copied to the
+> new folder. The old world stays in the backup folder until you delete it.
+
 ---
 
-## 4. The student accounts
+## 5. The four steps in the browser
 
-The script writes two files. Both files have mode `600`:
+### Step 1 — Make the admin account
+
+Open `http://<server-ip>/installer`. Follow the pages. Keep **SQLite** for the
+database: it is enough for a school, and it needs no second container.
+
+### Step 2 — Make the node
+
+A "node" is a machine that runs game servers. You have one.
+
+In the panel: **Admin → Nodes → Create Node**.
+
+| Field | Value |
+|---|---|
+| Name | `local` |
+| FQDN / IP | the IP address of the server |
+| Communicate over | **HTTP** (this is a LAN, not the internet) |
+| Daemon port | `8080` |
+| SFTP port | `2022` |
+| Memory / Disk | the values of this machine |
+
+Open the node, tab **Configuration**, and click **Auto Deploy Command**. Copy
+that command and run it on the server as root. It writes
+`/etc/pelican/config.yml`. Then:
+
+```bash
+sudo systemctl enable --now wings
+mcadmin wings status
+```
+
+The node must show a green heart in the panel.
+
+### Step 3 — Add the ports
+
+In the node, tab **Allocations**, add two ports for the server IP:
+
+- `25565` — the game port
+- `25575` — the console port (RCON)
+
+### Step 4 — Make the Minecraft server
+
+**Admin → Servers → Create Server**.
+
+| Field | Value |
+|---|---|
+| Egg | Minecraft → Paper |
+| Version | `1.21.11` |
+| Primary allocation | `25565` |
+| Extra allocation | `25575` |
+| Memory | 4096 MB or more |
+
+Start the server one time so that it makes its files, then stop it. Then, on
+the server:
+
+```bash
+mcadmin servers            # it shows the UUID of the server
+mcadmin prepare <uuid>     # AuthMe, PacketEvents, offline mode, RCON
+```
+
+`mcadmin prepare` does this:
+
+- It downloads the Paper build of AuthMeReloaded from Modrinth.
+- It downloads PacketEvents. AuthMe needs it for the inventory protection.
+- It writes the AuthMe configuration.
+- It sets `online-mode=false` and `enforce-secure-profile=false`.
+- It turns on RCON with a new random password, and saves that password.
+
+Start the server again in the panel, then:
+
+```bash
+mcadmin register           # it registers the 50 accounts
+```
+
+---
+
+## 6. The student accounts
+
+The script writes two files. Both have mode `600`:
 
 ```
 /opt/minecraft-ecole/secrets/comptes-eleves.csv   numero,pseudo,motdepasse
@@ -112,25 +211,30 @@ Ne donne jamais ton mot de passe a un autre eleve.
 
 ---
 
-## 5. Daily management — the `mcadmin` command
+## 7. Daily management — the `mcadmin` command
 
 ```
-mcadmin start                  Start all containers
-mcadmin stop                   Stop all containers
-mcadmin restart                Restart all containers
-mcadmin status                 Show the state of the containers
-mcadmin logs [service]         Follow the logs (default: mc)
-mcadmin console                Open the Minecraft console
-mcadmin cmd "<command>"        Send one command to the server
-mcadmin players                Show the players that are online
+PANEL AND DAEMON
+  mcadmin panel <start|stop|restart|status|logs>
+  mcadmin wings <start|stop|restart|status|logs>
+  mcadmin key                     Show the app key of the panel
+  mcadmin status                  Show the state of everything
 
-mcadmin accounts               Show the account list
-mcadmin add <pseudo> [pwd]     Make one more account
-mcadmin passwd <pseudo> <pwd>  Change a password
-mcadmin remove <pseudo>        Delete an account
+GAME SERVERS
+  mcadmin servers                 List the server folders of Wings
+  mcadmin prepare <uuid>          Install AuthMe + PacketEvents in a server
 
-mcadmin backup                 Make a backup of the world
-mcadmin update                 Pull new images and restart
+CONSOLE (RCON)
+  mcadmin rcon-setup <port> <pwd> Save the console access
+  mcadmin cmd "<command>"         Send one command
+  mcadmin players                 Show the players that are online
+
+STUDENT ACCOUNTS
+  mcadmin accounts                Show the account list
+  mcadmin register                Register all accounts of the CSV
+  mcadmin add <pseudo> [pwd]      Make one more account
+  mcadmin passwd <pseudo> <pwd>   Change a password
+  mcadmin remove <pseudo>         Delete an account
 ```
 
 Examples:
@@ -140,243 +244,209 @@ mcadmin add eleve51                 # new student, random password
 mcadmin passwd eleve07 Nouveau2026  # a student lost the password
 mcadmin cmd "say Le cours commence dans 5 minutes"
 mcadmin cmd "kick eleve12 Pause"
+mcadmin panel logs                  # the panel logs
+mcadmin wings logs                  # the daemon logs
 ```
+
+Press `Ctrl+C` to stop a log view.
 
 ---
 
-## 6. The two web panels
+## 8. Plugins, mods and modpacks
 
-Each panel uses a self-signed certificate. The browser shows a warning.
-Accept the warning.
+This is the reason for a panel. The panel keeps a **file manager**, a
+**console**, a **backup** tool and a **startup** tab for each server.
+
+**A plugin (Paper).** Put the `.jar` file in the `plugins` folder with the
+file manager, then restart the server. You can also use the Modrinth or the
+Spigot page and upload the file.
+
+**A mod (Fabric or Forge).** Make a **new** server with the Fabric egg or the
+Forge egg. Put the `.jar` files in the `mods` folder. A mod server needs the
+same mods on each student computer.
+
+**A modpack.** Pelican and Pterodactyl have eggs for CurseForge and for
+Modrinth modpacks. In **Admin → Eggs → Import Egg**, import the egg JSON file,
+then make a server with it and give the modpack ID.
+
+> **Important for a mod or modpack server:** AuthMeReloaded is a Paper plugin.
+> It does not work on Fabric or Forge. For those servers, use a different
+> login mod, or a whitelist, or a separate LAN with no login.
+
+> **Ports:** each new server needs its own allocation. Add more ports in the
+> node, for example 25566 to 25580.
+
+---
+
+## 9. The two web panels
+
+Each panel uses a certificate that the browser does not know. Accept the
+warning.
+
+### Pelican Panel — `http://<server-ip>`
+
+This is the main tool. It gives the console, the files, the backups, the
+players and the start/stop buttons of each game server.
+
+Read the panel logs:
+
+```bash
+mcadmin panel logs
+```
+
+The same in plain Docker:
+
+```bash
+sudo docker logs -f --tail=200 pelican-panel
+```
+
+If you lose the admin password, make a new admin user from the container:
+
+```bash
+sudo docker exec -it pelican-panel php artisan p:user:make
+```
 
 ### Portainer — `https://<server-ip>:9443`
 
-Portainer manages the **containers**. Use it to start, stop and restart the
-Minecraft container, to read the logs, and to open a shell in the container.
-Portainer asks you to make the admin password at the first visit. Do this in
-the first minutes. If the time is over, run `docker restart portainer-ecole`.
+Portainer manages the **containers**: the panel container, and the containers
+that Wings makes for the game servers. Use it to read logs and to open a
+shell.
 
-### Crafty Controller — `https://<server-ip>:8443`
-
-The first password is in:
-
-```
-/opt/minecraft-ecole/crafty/config/default-creds.txt
-```
-
-Change the password at the first login.
-
-#### Crafty does not show the school server. This is normal.
-
-Crafty controls only the servers that **Crafty itself** starts. The school
-server runs in a different container (`mc-ecole`), so Crafty cannot see it in
-the server list, and Crafty cannot start or stop it.
-
-```
-  Portainer  ──controls──>  [ mc-ecole container ]   <── mcadmin (RCON)
-  Crafty     ──controls──>  [ servers that Crafty made ]
-```
-
-Use Crafty for a **second** server (a creative world, a test world) on ports
-25601–25650, and to browse or back up files. For the main server, use
-Portainer or `mcadmin`.
-
-The main server folder is mounted read-only in Crafty under
-`import/mc-ecole`, so you can look at the files from the panel.
-
-#### Option: move the main server into Crafty
-
-Do this only if you want one panel for everything. You lose the automatic
-plugin download and the `mcadmin` commands.
+Read the Portainer logs:
 
 ```bash
-# 1. Stop the container that holds the server.
-mcadmin stop
-
-# 2. Make a zip of the server.
-sudo apt-get install -y zip
-cd /opt/minecraft-ecole/data
-sudo zip -r /tmp/mc-ecole.zip . -x 'logs/*' 'cache/*'
-
-# 3. In Crafty: Servers > Create New Server > Upload Zip Archive.
-#    Give a name, upload /tmp/mc-ecole.zip, then click "Import Server!".
-
-# 4. In Crafty, open the server, then Config:
-#    - Server port: 25565
-#    - Minimum and maximum memory: the same value as MC_MEMORY
-#    - Start command: check that it points to the Paper jar in the zip.
-
-# 5. Stop the old container for good.
-cd /opt/minecraft-ecole
-sudo docker compose stop mc
+mcadmin panel status
+sudo docker logs -f --tail=200 portainer-ecole
 ```
 
-The AuthMe plugin, its configuration and its database are in the zip, so the
-student accounts continue to work.
+Portainer asks you to make the admin password at the first visit. Do this in
+the first minutes. If the time is over, restart the container:
 
-> **Caution:** two servers cannot use port 25565 at the same time. Stop the
-> `mc-ecole` container before you start the Crafty copy.
+```bash
+sudo docker restart portainer-ecole
+```
 
 ---
 
-## 7. Security notes
+## 10. Security notes
 
 **What the setup protects against**
 
 - A student who uses the pseudo of another student is blocked at the login.
 - A student who does not have an account is kicked (`kickNonRegistered`).
 - A player who is not logged in cannot move, chat, or use the inventory.
-- The RCON port is **not** published on the LAN. It stays inside Docker.
 - Passwords are stored with BCRYPT in an SQLite database.
+- The console port is open on the server only, not for the students. Do not
+  put `25575` in the firewall rules.
 
 **What the setup does not protect against**
 
 - Offline mode has no cryptographic identity. The protection is the password
-  only. This is correct for a closed LAN, but do not put this server on the
+  only. This is correct for a closed LAN. Do not put this server on the
   public internet.
 - A student who reads another slip can log in as that student. Keep the slips
   private.
-
-**Second lock — the whitelist**
-
-The script writes `/opt/minecraft-ecole/data/whitelist.json` with the correct
-offline UUID of each student. The whitelist is **off** by default, because
-AuthMe already blocks unknown names. To turn it on:
-
-```bash
-sudo sed -i 's/^ENABLE_WHITELIST=.*/ENABLE_WHITELIST=true/' /opt/minecraft-ecole/.env
-mcadmin restart
-```
+- Wings runs as root and it controls Docker. Give the panel admin account to
+  teachers only.
 
 **Session length**
 
 After a login, a reconnection in the next 30 minutes does not ask for the
-password again. Change `settings.sessions.timeout` in
-`/opt/minecraft-ecole/data/plugins/AuthMe/config.yml`, then run
-`mcadmin cmd "authme reload"`.
+password again. Change `settings.sessions.timeout` in the file
+`plugins/AuthMe/config.yml` of the server (use the file manager of the
+panel), then run `mcadmin cmd "authme reload"`.
 
 ---
 
-## 8. Files and folders
+## 11. Files and folders
 
 ```
 /opt/minecraft-ecole/
 ├── .env                        Settings that docker compose reads
-├── docker-compose.yml          The three services
-├── data/                       Minecraft server (world, plugins, logs)
-│   ├── plugins/AuthMe/config.yml
-│   ├── plugins/AuthMe/authme.db
-│   └── whitelist.json
-├── crafty/                     Crafty Controller data
-├── backups/                    Made by "mcadmin backup"
+├── docker-compose.yml          Panel and Portainer
+├── bin/rcon.py                 Small RCON client (standard library only)
+├── templates/authme-config.yml Model configuration for AuthMe
 └── secrets/
     ├── comptes-eleves.csv
-    └── comptes-eleves.txt
+    ├── comptes-eleves.txt
+    └── rcon.env                Console port and password
+
+/etc/pelican/config.yml         Wings configuration (from the panel)
+/var/lib/pelican/volumes/<uuid> The files of one game server
+/etc/systemd/system/wings.service
 ```
 
 ---
 
-## 9. Troubleshooting
+## 12. Troubleshooting
 
-**The server does not start.**
-Run `mcadmin logs`. A common cause is not enough RAM. Lower `MC_MEMORY`
-in `.env`, then run `mcadmin restart`.
+**The node stays red in the panel.**
+Wings does not run, or the panel cannot reach it.
+
+```bash
+mcadmin wings status
+mcadmin wings logs
+```
+
+Check that the node uses **HTTP**, port `8080`, and the correct IP address.
+Run the Auto Deploy Command again if `/etc/pelican/config.yml` is wrong.
+
+**The panel page does not open.**
+Port 80 can be used by another web server.
+
+```bash
+sudo ss -tlnp | grep ':80 '
+mcadmin panel logs
+```
+
+Stop the other web server, or set `PANEL_HTTP_PORT=8081` and install again.
+
+**The game server does not start.**
+Read the console in the panel first. A common cause is not enough memory.
+Lower the memory of the server in the panel, or add RAM.
 
 **A student sees "You are not registered".**
 The pseudo does not match. Check the exact spelling with `mcadmin accounts`.
 Prism Launcher must use that exact name.
 
-**AuthMe did not load.**
-Run `mcadmin cmd "plugins"`. If AuthMe is not in the list, the Modrinth
-download failed. Check the network, then run `mcadmin restart`.
-
-**The Minecraft version and the plugin version do not match.**
-AuthMeReloaded 6.x needs Paper 1.21.11 or later. If you lower `MC_VERSION`,
-use AuthMeReloaded 5.6.0 instead, and put the jar in `data/plugins/` by hand.
-
-**A student cannot connect at all.**
-Check the firewall: `sudo ufw status`. Port 25565/tcp must be open.
-
-**Crafty shows "Crafty is having trouble accessing the internet.
-Server Creation has been disabled."**
-
-Crafty makes one test at each page load: an HTTPS GET to `https://google.com`
-with a timeout of **1 second**. If the test fails, Crafty disables the form
-that makes a new server, because that form downloads a server jar.
-
-This message does **not** stop the school server. The `mc-ecole` container
-runs and the students can play. Only the Crafty "Create New Server" form is
-off. The "Upload Zip Archive" import on the same page continues to work.
-
-Find the cause. Do the same test from inside the container. Crafty keeps its
-Python packages in a virtualenv, so you must use the Python of that
-virtualenv. The system `python3` does not have the `requests` module.
+**`mcadmin register` says that the console access is not set.**
+Run `mcadmin prepare <uuid>` first, or set it by hand:
 
 ```bash
-sudo docker exec crafty-ecole /crafty/.venv/bin/python3 -c \
-  "import requests; print(requests.get('https://google.com', timeout=1).status_code)"
+mcadmin rcon-setup 25575 <the-rcon-password>
 ```
 
-This next test uses the standard library only. It also shows the time, which
-is the important number:
+The password is in the `server.properties` of the server, in the panel file
+manager.
+
+**AuthMe says that PacketEvents is missing.**
+`mcadmin prepare` downloads it. If the download failed, take the Paper build
+from <https://modrinth.com/plugin/packetevents> and upload it to the
+`plugins` folder with the panel.
+
+**A container cannot resolve a name
+("Temporary failure in name resolution").**
+
+Look at the file first:
 
 ```bash
-sudo docker exec crafty-ecole python3 -c "
-import urllib.request, time
-t = time.time()
-r = urllib.request.urlopen('https://google.com', timeout=5)
-print('status', r.status, '- time', round(time.time() - t, 2), 's')
-"
-```
-
-| Result | Cause | What to do |
-|---|---|---|
-| `status 200 - time 0.3 s` | The network is good. | Do the venv test above for a DNS or TLS problem. |
-| `status 200 - time 1.5 s` | Too slow. Crafty stops at 1 second. | See "Slow network" below. |
-| `Name or service not known` | The container cannot resolve names. | Add a DNS server (below). |
-| `timed out` or connection refused | A school filter or a proxy blocks it. | Allow `google.com` for the server IP, or set a proxy (below). |
-
-**Add a DNS server.** A "Temporary failure in name resolution" error means
-that the container cannot resolve a name. Look at the file first:
-
-```bash
-sudo docker exec crafty-ecole cat /etc/resolv.conf
+sudo docker exec <container> cat /etc/resolv.conf
 ```
 
 *Case 1 — the file says `NO EXTERNAL NAMESERVERS DEFINED`.*
-
-Docker writes this file one time only: when it **creates** the container. If
-the host had no usable nameserver at that moment, the container keeps an
-empty resolver for its full life. A `restart` does not repair this, because a
-restart uses the same container. You must recreate it:
+Docker writes this file one time only: when it **creates** the container. A
+`restart` does not repair it. You must recreate the container:
 
 ```bash
 cd /opt/minecraft-ecole
-sudo docker compose up -d --force-recreate crafty
+sudo docker compose up -d --force-recreate
 ```
 
-The data is in bind mounts, so nothing is lost. Do the same for `mc` if that
-container has the same problem.
-
-*Case 2 — the file has a nameserver, but the name still does not resolve.*
-
-The host DNS is not good for the containers.
-
-Find the DNS server that the host really uses:
+*Case 2 — the file has a nameserver, but the name does not resolve.*
+Find the DNS server that the host uses, then give it to Docker:
 
 ```bash
 grep nameserver /etc/resolv.conf
-resolvectl status 2>/dev/null | grep -i 'DNS Server'
-```
-
-If `/etc/resolv.conf` shows `127.0.0.53`, the host uses systemd-resolved.
-A container cannot use that address. Docker then falls back to `8.8.8.8`,
-and a school filter often blocks that address.
-
-Give Docker the real DNS server. Replace `10.0.0.1` with the address from
-`resolvectl status`:
-
-```bash
 sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
 {
   "dns": ["10.0.0.1", "9.9.9.9"]
@@ -385,67 +455,50 @@ EOF
 sudo systemctl restart docker
 ```
 
-Verify. A line with an IP address means the fix works:
-
-```bash
-sudo docker exec crafty-ecole getent hosts google.com
-```
-
-For one container only, you can instead put this in the `crafty` service in
-`/opt/minecraft-ecole/docker-compose.yml`:
-
-```yaml
-    dns:
-      - 10.0.0.1
-      - 9.9.9.9
-```
-
-**Set a proxy.** If the school uses an HTTP proxy, add this to the
-`environment:` block of the `crafty` service:
-
-```yaml
-      HTTP_PROXY: "http://proxy.ecole.local:3128"
-      HTTPS_PROXY: "http://proxy.ecole.local:3128"
-      NO_PROXY: "localhost,127.0.0.1"
-```
-
-**Slow network.** The 1-second timeout is in the Crafty code. You cannot
-change it from the configuration. Ask the network administrator to allow
-`google.com` for the server. If this is not possible, use the zip import,
-or do not use Crafty to make new servers.
-
-After each change:
-
-```bash
-cd /opt/minecraft-ecole && sudo docker compose up -d crafty
-```
-
-Then refresh the Crafty page in the browser.
-
-**Crafty does not show the school Minecraft server.**
-This is normal. Crafty controls only the servers that Crafty made. Read
-part 6 of this file.
+Replace `10.0.0.1` with the real address. If `/etc/resolv.conf` shows
+`127.0.0.53`, the host uses systemd-resolved; a container cannot use that
+address, and Docker then falls back to `8.8.8.8`, which a school filter often
+blocks.
 
 ---
 
-## 10. Remove the stack
+## 13. Backups
+
+The panel makes backups of one server: open the server, tab **Backups**.
+
+You can also make a backup from the command line:
+
+```bash
+sudo tar -C /var/lib/pelican/volumes -czf /root/backup-$(date +%F).tar.gz <uuid>
+```
+
+Copy the file `comptes-eleves.csv` at the same time. It is not in the server
+folder.
+
+---
+
+## 14. Remove the stack
 
 ```bash
 cd /opt/minecraft-ecole
-docker compose down -v
+sudo docker compose down -v
+sudo systemctl disable --now wings
+sudo rm -f /usr/local/bin/wings /etc/systemd/system/wings.service
+sudo rm -rf /etc/pelican /var/lib/pelican
 sudo rm -rf /opt/minecraft-ecole /usr/local/bin/mcadmin
 ```
 
-This deletes the world. Make a backup first with `mcadmin backup`.
+This deletes every world and every account. Make a backup first.
 
 ---
 
-## 11. Licences and sources
+## 15. Licences and sources
 
+- Pelican Panel — MIT — <https://pelican.dev>
+- Pelican Wings — MIT — <https://github.com/pelican-dev/wings>
 - Paper — GPL-3.0 — <https://papermc.io>
 - AuthMeReloaded — GPL-3.0 — <https://modrinth.com/plugin/authmereloaded>
-- `itzg/minecraft-server` — Apache-2.0 — <https://docker-minecraft-server.readthedocs.io>
-- Crafty Controller — GPL-3.0 — <https://docs.craftycontrol.com>
+- PacketEvents — GPL-3.0 — <https://modrinth.com/plugin/packetevents>
 - Portainer CE — zlib — <https://www.portainer.io>
 
 Minecraft is a product of Mojang Studios. Each player needs a licence of the
