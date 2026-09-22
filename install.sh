@@ -62,7 +62,12 @@ SKIP_DOCKER_INSTALL="${SKIP_DOCKER_INSTALL:-no}"
 REMOVE_OLD_STACK="${REMOVE_OLD_STACK:-yes}"
 
 PASSWORD_ALPHABET='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
-WINGS_URL_BASE="https://github.com/pelican-dev/wings/releases/latest/download"
+
+# Pelican moved its images and its repository to the "pelican" namespace.
+# The old name "pelican-dev" gives "error from registry: denied".
+PANEL_IMAGE="${PANEL_IMAGE:-ghcr.io/pelican/panel:latest}"
+PORTAINER_IMAGE="${PORTAINER_IMAGE:-portainer/portainer-ce:latest}"
+WINGS_URL_BASE="https://github.com/pelican/wings/releases/latest/download"
 PAPER_EGG_URL="${PAPER_EGG_URL:-https://raw.githubusercontent.com/pelican-eggs/minecraft/refs/heads/main/java/paper/egg-paper.yaml}"
 
 PANEL_CONTAINER="pelican-panel"
@@ -228,6 +233,8 @@ write_env() {
     log "Write the file .env."
     cat > "$INSTALL_DIR/.env" <<EOF
 PANEL_URL=http://$SERVER_IP
+PANEL_IMAGE=$PANEL_IMAGE
+PORTAINER_IMAGE=$PORTAINER_IMAGE
 ADMIN_EMAIL=$ADMIN_EMAIL
 PANEL_HTTP_PORT=$PANEL_HTTP_PORT
 PANEL_HTTPS_PORT=$PANEL_HTTPS_PORT
@@ -253,7 +260,7 @@ write_compose() {
 services:
 
   panel:
-    image: ghcr.io/pelican-dev/panel:latest
+    image: "${PANEL_IMAGE}"
     container_name: pelican-panel
     restart: always
     ports:
@@ -273,7 +280,7 @@ YAML_HEAD
         cat >> "$INSTALL_DIR/docker-compose.yml" <<'YAML_PORTAINER'
 
   portainer:
-    image: portainer/portainer-ce:latest
+    image: "${PORTAINER_IMAGE}"
     container_name: portainer-ecole
     restart: unless-stopped
     ports:
@@ -650,11 +657,47 @@ write_templates() {
 # ----------------------------------------------------------------------------
 # Step 5 — Start the panel and configure it without a browser
 # ----------------------------------------------------------------------------
+pull_image() {
+    local image="$1" what="$2"
+    log "Pull the $what image: $image"
+    if docker pull "$image" >/dev/null 2>"$INSTALL_DIR/pull.log"; then
+        ok "The $what image is present."
+        rm -f "$INSTALL_DIR/pull.log"
+        return 0
+    fi
+
+    cat >&2 <<EOF
+
+${C_ERR} The image $image did not pull.${C_OFF}
+
+ The message from Docker:
+$(sed 's/^/   /' "$INSTALL_DIR/pull.log")
+
+ Look at the three usual causes:
+
+ 1. The name changed. Pelican moved from "pelican-dev" to "pelican".
+    Test the two names:
+      sudo docker pull ghcr.io/pelican/panel:latest
+      sudo docker pull ghcr.io/pelican-dev/panel:latest
+    If the other name works, run the script again with it:
+      sudo PANEL_IMAGE=<the name that works> bash install.sh
+
+ 2. The registry is not reachable. A school filter often blocks ghcr.io.
+      curl -sSI https://ghcr.io/v2/ | head -1
+    Ask the network administrator to allow ghcr.io.
+
+ 3. The container has no DNS. Read part 11 of the README.
+
+EOF
+    exit 1
+}
+
 start_panel() {
-    log "Pull the images. This step can take some minutes."
-    (cd "$INSTALL_DIR" && docker compose pull -q) || warn "One image did not pull."
+    pull_image "$PANEL_IMAGE" "panel"
+    [ "$INSTALL_PORTAINER" = "yes" ] && pull_image "$PORTAINER_IMAGE" "Portainer"
     log "Start the panel."
-    (cd "$INSTALL_DIR" && docker compose up -d)
+    (cd "$INSTALL_DIR" && docker compose up -d) \
+        || die "The containers did not start. Use: docker compose logs"
 }
 
 wait_for_panel() {

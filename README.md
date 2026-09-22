@@ -1,44 +1,62 @@
 # minecraft-ecole
 
-An installer for a school game-server machine on Debian.
+One command installs a complete school game-server machine on Debian.
 
-The panel is **Pelican Panel**, with the **Wings** daemon. Each game server
-runs in its own Docker container. You make servers, install plugins, mods and
-modpacks, and read the console from a web page.
+```bash
+sudo bash install.sh
+```
 
-The clients are not official, so the Minecraft server runs in **offline mode**.
-The **AuthMeReloaded** plugin gives the protection: a player who joins cannot
-move, cannot chat and cannot touch the world. The player must first type a
-login command in the chat.
+When the script stops, the Minecraft server runs, the web panel works, and
+the 50 student accounts are registered. **No step in a browser.**
 
 ---
 
-## 1. Why Pelican and not Pterodactyl
+## 1. What you get
+
+| Component | Purpose | Port |
+|---|---|---|
+| Docker CE + Compose plugin | Container runtime | — |
+| Pelican Panel (container) | Web panel: servers, console, files, backups | 80, 443 |
+| Pelican Wings (systemd) | Daemon that runs each game server | 8080, 2022 |
+| Paper Minecraft server | The school server, in offline mode | 25565 |
+| AuthMeReloaded + PacketEvents | Login by chat command | — |
+| Portainer CE (container) | Web panel for the containers | 9443 |
+| `mcadmin` | Command-line tool for the teacher | — |
+
+The clients are not official, so the server runs in **offline mode**. A player
+who joins cannot move, cannot chat and cannot touch the world. The player must
+first type `/login <password>` in the chat.
+
+### Why Pelican and not Pterodactyl
 
 Pterodactyl had no release after **v1.15.1 of August 2024**. Pelican Panel is
 the active fork, made by former Pterodactyl developers. It has the same
 architecture, it reads Pterodactyl **eggs**, and it gets security patches.
 
 The Wings daemon is at **v1.0.0-beta29**. It is a beta, but it is the version
-that Pelican ships and that people use in production. Make backups.
+that Pelican ships. Make backups.
 
 ---
 
-## 2. What the script installs
+## 2. How the script replaces the web installer
 
-| Component | Purpose | Port |
-|---|---|---|
-| Docker CE + Compose plugin | Container runtime | — |
-| Pelican Panel (container) | Web panel: servers, console, files, users | 80, 443 |
-| Pelican Wings (systemd) | Daemon that runs each game server | 8080, 2022 |
-| Portainer CE (container) | Web panel for the containers | 9443 |
-| `mcadmin` | Command-line tool for the teacher | — |
+This is the part that is usually manual. The script does it with the panel's
+own code, not with a browser robot.
 
-The script also makes 50 accounts (`eleve01` … `eleve50`) with random
-passwords, and writes them to a CSV file and to printable slips.
+| Manual step | What the script does |
+|---|---|
+| Installer wizard | It writes `APP_INSTALLED=true` in the panel `.env`, then runs `php artisan migrate --seed --force` |
+| Admin account | `php artisan p:user:make --admin=1` with a random password |
+| Create the node | `App\Models\Node::create(...)` |
+| Wings configuration | `$node->getYamlConfiguration()` writes `/etc/pelican/config.yml` |
+| Add the ports | `App\Services\Allocations\AssignmentService` |
+| Import the Paper egg | `App\Services\Eggs\Sharing\EggImporterService::fromUrl()` |
+| Create the server | `App\Services\Servers\ServerCreationService::handle()` |
+| Start the server | `App\Repositories\Daemon\DaemonServerRepository::power('start')` |
 
-The Minecraft server itself is **not** in the script. You make it in the
-panel, because that is what gives you plugins, mods and modpacks later.
+The script puts a small PHP file (`school-bootstrap.php`) in the panel
+container. That file boots the Laravel application of the panel and calls
+these services. You can read it in `bin/school-bootstrap.php`.
 
 ---
 
@@ -48,7 +66,19 @@ panel, because that is what gives you plugins, mods and modpacks later.
 - Root access.
 - 6 GB RAM or more: 4 GB for the game server, the rest for the panel.
 - 20 GB free disk or more. A modpack can use 5 GB.
-- An internet connection for the installation. The lessons can be offline.
+- An internet connection during the installation. The lessons can be offline.
+
+The installation downloads from these hosts. A school filter must let them
+pass:
+
+| Host | For |
+|---|---|
+| `download.docker.com` | Docker CE |
+| `ghcr.io` | The panel image, and the Java images of the game servers |
+| `github.com` | The Wings binary |
+| `raw.githubusercontent.com` | The Paper egg |
+| `api.modrinth.com` and `cdn.modrinth.com` | AuthMe and PacketEvents |
+| `fill.papermc.io` | The Paper server jar |
 
 ---
 
@@ -58,129 +88,70 @@ panel, because that is what gives you plugins, mods and modpacks later.
 sudo bash install.sh
 ```
 
-The script does the automatic part. It then prints four steps that you do in
-the browser. Part 5 explains those steps.
+The script takes 15 to 30 minutes. Most of that time is the download of the
+images and of the Paper server. The script prints each step, so you see where
+it is.
+
+At the end it prints the addresses, the panel password file and the account
+file.
 
 ### Change the defaults
 
 ```bash
-sudo ACCOUNT_COUNT=30 PANEL_URL=http://10.0.0.20 bash install.sh
+sudo ACCOUNT_COUNT=30 MC_MEMORY_MB=6144 SETUP_FIREWALL=yes bash install.sh
 ```
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `INSTALL_DIR` | `/opt/minecraft-ecole` | Where the stack is installed |
-| `PANEL_URL` | `http://<server-ip>` | The URL of the panel |
-| `ADMIN_EMAIL` | `admin@ecole.local` | Used by the panel for certificates |
-| `PANEL_HTTP_PORT` | `80` | Panel, HTTP |
-| `PANEL_HTTPS_PORT` | `443` | Panel, HTTPS |
-| `WINGS_PORT` | `8080` | Daemon port |
-| `WINGS_SFTP_PORT` | `2022` | SFTP port of the daemon |
+| `SERVER_IP` | detected | The LAN address of the server |
 | `MC_PORT` | `25565` | Game port |
-| `RCON_PORT` | `25575` | Console port |
-| `MC_VERSION` | `1.21.11` | Used by `mcadmin prepare` |
+| `RCON_PORT` | `25575` | Console port (host only) |
+| `MC_VERSION` | `1.21.11` | Minecraft version |
+| `MC_MEMORY_MB` | `4096` | Memory of the game server |
+| `MC_DISK_MB` | `15360` | Disk of the game server |
+| `MC_SERVER_NAME` | `Serveur ecole` | Name in the panel |
+| `MC_JAVA_IMAGE` | `…/yolks:java_25` | Java image of the server |
 | `ACCOUNT_COUNT` | `50` | Number of student accounts |
 | `ACCOUNT_PREFIX` | `eleve` | Start of each pseudo |
+| `ADMIN_EMAIL` | `admin@ecole.local` | Panel administrator |
+| `ADMIN_USERNAME` | `admin` | Panel administrator |
+| `PANEL_IMAGE` | `ghcr.io/pelican/panel:latest` | The panel image |
+| `PANEL_HTTP_PORT` | `80` | Panel |
+| `WINGS_PORT` | `8080` | Daemon |
+| `WINGS_SFTP_PORT` | `2022` | SFTP of the daemon |
+| `WINGS_DATA` | `/var/lib/pelican/volumes` | Where the server files live |
 | `PORTAINER_PORT` | `9443` | Portainer |
 | `INSTALL_PORTAINER` | `yes` | `no` skips Portainer |
 | `SETUP_FIREWALL` | `no` | `yes` configures `ufw` |
-| `REMOVE_OLD_STACK` | `yes` | Replaces an old Crafty stack |
+| `REMOVE_OLD_STACK` | `yes` | Replaces an old Crafty or itzg stack |
 
 > **Caution:** `SETUP_FIREWALL=yes` enables `ufw`. The script opens port 22
 > first. If you use a different SSH port, open it before you run the script.
 
-> If an old Crafty stack is in `INSTALL_DIR`, the script stops it and moves
-> the folder to `INSTALL_DIR.old-<date>`. The account list is copied to the
-> new folder. The old world stays in the backup folder until you delete it.
+> If an old stack is in `INSTALL_DIR`, the script stops it and moves the
+> folder to `INSTALL_DIR.old-<date>`. The account list is copied to the new
+> folder. The old world stays in the backup until you delete it.
+
+### If you run the script two times
+
+The script does not make a second copy of anything. It finds the node by its
+address, the egg by its name, the server by its name and the accounts by the
+CSV file. A second run repairs a step that failed, and it keeps the passwords.
 
 ---
 
-## 5. The four steps in the browser
+## 5. The student accounts
 
-### Step 1 — Make the admin account
-
-Open `http://<server-ip>/installer`. Follow the pages. Keep **SQLite** for the
-database: it is enough for a school, and it needs no second container.
-
-### Step 2 — Make the node
-
-A "node" is a machine that runs game servers. You have one.
-
-In the panel: **Admin → Nodes → Create Node**.
-
-| Field | Value |
-|---|---|
-| Name | `local` |
-| FQDN / IP | the IP address of the server |
-| Communicate over | **HTTP** (this is a LAN, not the internet) |
-| Daemon port | `8080` |
-| SFTP port | `2022` |
-| Memory / Disk | the values of this machine |
-
-Open the node, tab **Configuration**, and click **Auto Deploy Command**. Copy
-that command and run it on the server as root. It writes
-`/etc/pelican/config.yml`. Then:
-
-```bash
-sudo systemctl enable --now wings
-mcadmin wings status
-```
-
-The node must show a green heart in the panel.
-
-### Step 3 — Add the ports
-
-In the node, tab **Allocations**, add two ports for the server IP:
-
-- `25565` — the game port
-- `25575` — the console port (RCON)
-
-### Step 4 — Make the Minecraft server
-
-**Admin → Servers → Create Server**.
-
-| Field | Value |
-|---|---|
-| Egg | Minecraft → Paper |
-| Version | `1.21.11` |
-| Primary allocation | `25565` |
-| Extra allocation | `25575` |
-| Memory | 4096 MB or more |
-
-Start the server one time so that it makes its files, then stop it. Then, on
-the server:
-
-```bash
-mcadmin servers            # it shows the UUID of the server
-mcadmin prepare <uuid>     # AuthMe, PacketEvents, offline mode, RCON
-```
-
-`mcadmin prepare` does this:
-
-- It downloads the Paper build of AuthMeReloaded from Modrinth.
-- It downloads PacketEvents. AuthMe needs it for the inventory protection.
-- It writes the AuthMe configuration.
-- It sets `online-mode=false` and `enforce-secure-profile=false`.
-- It turns on RCON with a new random password, and saves that password.
-
-Start the server again in the panel, then:
-
-```bash
-mcadmin register           # it registers the 50 accounts
-```
-
----
-
-## 6. The student accounts
-
-The script writes two files. Both have mode `600`:
+Two files, both with mode `600`:
 
 ```
 /opt/minecraft-ecole/secrets/comptes-eleves.csv   numero,pseudo,motdepasse
 /opt/minecraft-ecole/secrets/comptes-eleves.txt   printable slips
+/opt/minecraft-ecole/secrets/panel-admin.txt      the panel login
 ```
 
-Print the second file and cut it. Give one slip to each student.
+Print the slips file and cut it. Give one slip to each student.
 
 **Copy these files to a safe place. The passwords are not in the server
 database in clear text.**
@@ -211,23 +182,20 @@ Ne donne jamais ton mot de passe a un autre eleve.
 
 ---
 
-## 7. Daily management — the `mcadmin` command
+## 6. Daily management — the `mcadmin` command
 
 ```
+SERVER
+  mcadmin start | stop | restart | kill
+  mcadmin console "<command>"     Send one command to the server
+  mcadmin players                 Show the players that are online
+  mcadmin state                   Show the state of the server
+
 PANEL AND DAEMON
   mcadmin panel <start|stop|restart|status|logs>
   mcadmin wings <start|stop|restart|status|logs>
-  mcadmin key                     Show the app key of the panel
+  mcadmin admin                   Show the panel administrator account
   mcadmin status                  Show the state of everything
-
-GAME SERVERS
-  mcadmin servers                 List the server folders of Wings
-  mcadmin prepare <uuid>          Install AuthMe + PacketEvents in a server
-
-CONSOLE (RCON)
-  mcadmin rcon-setup <port> <pwd> Save the console access
-  mcadmin cmd "<command>"         Send one command
-  mcadmin players                 Show the players that are online
 
 STUDENT ACCOUNTS
   mcadmin accounts                Show the account list
@@ -235,72 +203,68 @@ STUDENT ACCOUNTS
   mcadmin add <pseudo> [pwd]      Make one more account
   mcadmin passwd <pseudo> <pwd>   Change a password
   mcadmin remove <pseudo>         Delete an account
+
+FILES
+  mcadmin files                   Show the folder of the server
+  mcadmin backup                  Make a backup of the server folder
 ```
 
 Examples:
 
 ```bash
+mcadmin console "say Le cours commence dans 5 minutes"
+mcadmin console "kick eleve12 Pause"
 mcadmin add eleve51                 # new student, random password
 mcadmin passwd eleve07 Nouveau2026  # a student lost the password
-mcadmin cmd "say Le cours commence dans 5 minutes"
-mcadmin cmd "kick eleve12 Pause"
-mcadmin panel logs                  # the panel logs
-mcadmin wings logs                  # the daemon logs
+mcadmin restart
 ```
 
 Press `Ctrl+C` to stop a log view.
 
 ---
 
-## 8. Plugins, mods and modpacks
+## 7. Plugins, mods and modpacks
 
-This is the reason for a panel. The panel keeps a **file manager**, a
-**console**, a **backup** tool and a **startup** tab for each server.
+The panel keeps a **file manager**, a **console**, a **backup** tool and a
+**startup** tab for each server.
 
 **A plugin (Paper).** Put the `.jar` file in the `plugins` folder with the
-file manager, then restart the server. You can also use the Modrinth or the
-Spigot page and upload the file.
+file manager, then restart the server. The folder is also on the disk:
 
-**A mod (Fabric or Forge).** Make a **new** server with the Fabric egg or the
-Forge egg. Put the `.jar` files in the `mods` folder. A mod server needs the
-same mods on each student computer.
+```bash
+mcadmin files      # it prints the path of the server folder
+```
 
-**A modpack.** Pelican and Pterodactyl have eggs for CurseForge and for
-Modrinth modpacks. In **Admin → Eggs → Import Egg**, import the egg JSON file,
-then make a server with it and give the modpack ID.
+**A mod (Fabric or Forge).** Make a **new** server in the panel with the
+Fabric egg or the Forge egg. Put the `.jar` files in the `mods` folder. A mod
+server needs the same mods on each student computer.
+
+**A modpack.** Pelican reads Pterodactyl eggs. In **Admin → Eggs → Import
+Egg**, import the CurseForge or Modrinth modpack egg, then make a server with
+it and give the modpack ID.
 
 > **Important for a mod or modpack server:** AuthMeReloaded is a Paper plugin.
-> It does not work on Fabric or Forge. For those servers, use a different
-> login mod, or a whitelist, or a separate LAN with no login.
+> It does not work on Fabric or Forge. For those servers, use a whitelist, or
+> a different login mod, or a separate lesson with no login.
 
-> **Ports:** each new server needs its own allocation. Add more ports in the
-> node, for example 25566 to 25580.
+> **Ports:** each new server needs its own allocation. In the panel, open
+> **Admin → Nodes → local → Allocations** and add more ports, for example
+> 25566 to 25580.
 
 ---
 
-## 9. The two web panels
-
-Each panel uses a certificate that the browser does not know. Accept the
-warning.
+## 8. The two web panels
 
 ### Pelican Panel — `http://<server-ip>`
 
-This is the main tool. It gives the console, the files, the backups, the
-players and the start/stop buttons of each game server.
-
-Read the panel logs:
+The main tool. Console, files, backups, players, start and stop.
 
 ```bash
-mcadmin panel logs
+mcadmin admin        # show the login and the password
+mcadmin panel logs   # the panel logs
 ```
 
-The same in plain Docker:
-
-```bash
-sudo docker logs -f --tail=200 pelican-panel
-```
-
-If you lose the admin password, make a new admin user from the container:
+If you lose the password, make a second administrator:
 
 ```bash
 sudo docker exec -it pelican-panel php artisan p:user:make
@@ -309,13 +273,9 @@ sudo docker exec -it pelican-panel php artisan p:user:make
 ### Portainer — `https://<server-ip>:9443`
 
 Portainer manages the **containers**: the panel container, and the containers
-that Wings makes for the game servers. Use it to read logs and to open a
-shell.
-
-Read the Portainer logs:
+that Wings makes for the game servers.
 
 ```bash
-mcadmin panel status
 sudo docker logs -f --tail=200 portainer-ecole
 ```
 
@@ -328,16 +288,18 @@ sudo docker restart portainer-ecole
 
 ---
 
-## 10. Security notes
+## 9. Security notes
 
 **What the setup protects against**
 
 - A student who uses the pseudo of another student is blocked at the login.
 - A student who does not have an account is kicked (`kickNonRegistered`).
 - A player who is not logged in cannot move, chat, or use the inventory.
+  PacketEvents gives the inventory and tab-complete protection; the script
+  installs it.
 - Passwords are stored with BCRYPT in an SQLite database.
-- The console port is open on the server only, not for the students. Do not
-  put `25575` in the firewall rules.
+- The console port (25575) and the daemon port (8080) stay closed in the
+  firewall rules. They are used on the host only.
 
 **What the setup does not protect against**
 
@@ -346,50 +308,71 @@ sudo docker restart portainer-ecole
   public internet.
 - A student who reads another slip can log in as that student. Keep the slips
   private.
-- Wings runs as root and it controls Docker. Give the panel admin account to
-  teachers only.
+- Wings runs as root and it controls Docker. Give the panel administrator
+  account to teachers only.
 
 **Session length**
 
 After a login, a reconnection in the next 30 minutes does not ask for the
 password again. Change `settings.sessions.timeout` in the file
-`plugins/AuthMe/config.yml` of the server (use the file manager of the
-panel), then run `mcadmin cmd "authme reload"`.
+`plugins/AuthMe/config.yml` of the server, then:
+
+```bash
+mcadmin console "authme reload"
+```
 
 ---
 
-## 11. Files and folders
+## 10. Files and folders
 
 ```
 /opt/minecraft-ecole/
-├── .env                        Settings that docker compose reads
-├── docker-compose.yml          Panel and Portainer
-├── bin/rcon.py                 Small RCON client (standard library only)
-├── templates/authme-config.yml Model configuration for AuthMe
+├── .env                          Settings that docker compose reads
+├── docker-compose.yml            Panel and Portainer
+├── bin/rcon.py                   Small RCON client (standard library only)
+├── bin/school-bootstrap.php      Headless setup of the panel
+├── templates/authme-config.yml   Model configuration for AuthMe
+├── backups/                      Made by "mcadmin backup"
 └── secrets/
-    ├── comptes-eleves.csv
-    ├── comptes-eleves.txt
-    └── rcon.env                Console port and password
+    ├── panel-admin.txt           Panel login
+    ├── comptes-eleves.csv        Student accounts
+    ├── comptes-eleves.txt        Printable slips
+    └── rcon.env                  Console port, password, server UUID
 
-/etc/pelican/config.yml         Wings configuration (from the panel)
-/var/lib/pelican/volumes/<uuid> The files of one game server
+/etc/pelican/config.yml           Wings configuration
+/var/lib/pelican/volumes/<uuid>   The files of one game server
 /etc/systemd/system/wings.service
 ```
 
 ---
 
-## 12. Troubleshooting
+## 11. Troubleshooting
+
+**The script stops at the migrations.**
+Read `/opt/minecraft-ecole/migrate.log`. A common cause is no network in the
+panel container. See the DNS part below.
+
+**The script stops at "The Paper egg was not imported".**
+The panel container cannot reach `raw.githubusercontent.com`. The panel gives
+the egg import a short timeout. Check the network, then run the script again.
+
+**The script stops at "The installation of the server failed".**
+Wings could not download the Paper jar or the Java image. Look at the install
+log in the panel, or:
+
+```bash
+mcadmin wings logs
+```
 
 **The node stays red in the panel.**
-Wings does not run, or the panel cannot reach it.
 
 ```bash
 mcadmin wings status
 mcadmin wings logs
 ```
 
-Check that the node uses **HTTP**, port `8080`, and the correct IP address.
-Run the Auto Deploy Command again if `/etc/pelican/config.yml` is wrong.
+Check that `/etc/pelican/config.yml` holds a `token:` line and that `remote:`
+points to `http://<server-ip>`.
 
 **The panel page does not open.**
 Port 80 can be used by another web server.
@@ -399,30 +382,11 @@ sudo ss -tlnp | grep ':80 '
 mcadmin panel logs
 ```
 
-Stop the other web server, or set `PANEL_HTTP_PORT=8081` and install again.
-
-**The game server does not start.**
-Read the console in the panel first. A common cause is not enough memory.
-Lower the memory of the server in the panel, or add RAM.
+Stop the other web server, or run the script with `PANEL_HTTP_PORT=8081`.
 
 **A student sees "You are not registered".**
 The pseudo does not match. Check the exact spelling with `mcadmin accounts`.
 Prism Launcher must use that exact name.
-
-**`mcadmin register` says that the console access is not set.**
-Run `mcadmin prepare <uuid>` first, or set it by hand:
-
-```bash
-mcadmin rcon-setup 25575 <the-rcon-password>
-```
-
-The password is in the `server.properties` of the server, in the panel file
-manager.
-
-**AuthMe says that PacketEvents is missing.**
-`mcadmin prepare` downloads it. If the download failed, take the Paper build
-from <https://modrinth.com/plugin/packetevents> and upload it to the
-`plugins` folder with the panel.
 
 **A container cannot resolve a name
 ("Temporary failure in name resolution").**
@@ -430,7 +394,7 @@ from <https://modrinth.com/plugin/packetevents> and upload it to the
 Look at the file first:
 
 ```bash
-sudo docker exec <container> cat /etc/resolv.conf
+sudo docker exec pelican-panel cat /etc/resolv.conf
 ```
 
 *Case 1 — the file says `NO EXTERNAL NAMESERVERS DEFINED`.*
@@ -443,7 +407,7 @@ sudo docker compose up -d --force-recreate
 ```
 
 *Case 2 — the file has a nameserver, but the name does not resolve.*
-Find the DNS server that the host uses, then give it to Docker:
+Give Docker a real DNS server:
 
 ```bash
 grep nameserver /etc/resolv.conf
@@ -462,22 +426,21 @@ blocks.
 
 ---
 
-## 13. Backups
-
-The panel makes backups of one server: open the server, tab **Backups**.
-
-You can also make a backup from the command line:
+## 12. Backups
 
 ```bash
-sudo tar -C /var/lib/pelican/volumes -czf /root/backup-$(date +%F).tar.gz <uuid>
+mcadmin backup
 ```
 
-Copy the file `comptes-eleves.csv` at the same time. It is not in the server
+The file goes to `/opt/minecraft-ecole/backups/`. The panel can also make
+backups: open the server, tab **Backups**.
+
+Copy `secrets/comptes-eleves.csv` at the same time. It is not in the server
 folder.
 
 ---
 
-## 14. Remove the stack
+## 13. Remove the stack
 
 ```bash
 cd /opt/minecraft-ecole
@@ -492,7 +455,7 @@ This deletes every world and every account. Make a backup first.
 
 ---
 
-## 15. Licences and sources
+## 14. Licences and sources
 
 - Pelican Panel — MIT — <https://pelican.dev>
 - Pelican Wings — MIT — <https://github.com/pelican-dev/wings>
