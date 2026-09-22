@@ -40,7 +40,7 @@ WINGS_DATA="${WINGS_DATA:-/var/lib/pelican/volumes}"
 
 MC_PORT="${MC_PORT:-25565}"
 RCON_PORT="${RCON_PORT:-25575}"
-MC_VERSION="${MC_VERSION:-1.21.11}"
+MC_VERSION="${MC_VERSION:-26.3}"
 MC_MEMORY_MB="${MC_MEMORY_MB:-4096}"
 MC_DISK_MB="${MC_DISK_MB:-15360}"
 MC_SERVER_NAME="${MC_SERVER_NAME:-Serveur ecole}"
@@ -67,7 +67,7 @@ PASSWORD_ALPHABET='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
 # The old name "pelican-dev" gives "error from registry: denied".
 PANEL_IMAGE="${PANEL_IMAGE:-ghcr.io/pelican/panel:latest}"
 PORTAINER_IMAGE="${PORTAINER_IMAGE:-portainer/portainer-ce:latest}"
-MAVEN_IMAGE="${MAVEN_IMAGE:-maven:3-eclipse-temurin-21}"
+MAVEN_IMAGE="${MAVEN_IMAGE:-maven:3-eclipse-temurin-25}"
 WINGS_URL_BASE="https://github.com/pelican/wings/releases/latest/download"
 
 # The folder that holds this script. The plugin source is next to it.
@@ -943,7 +943,17 @@ build_plugin() {
     mkdir -p "$INSTALL_DIR/.m2"
 
     # Use the API of the same Minecraft version as the server.
-    sed -i "s|<paper.version>.*</paper.version>|<paper.version>${MC_VERSION}-R0.1-SNAPSHOT</paper.version>|" \
+    # Up to 1.21.x the API version is "<mc>-R0.1-SNAPSHOT".
+    # From 26.1 the API version is "<mc>.build.<n>-<channel>". Thus we use a
+    # Maven range from "<mc>.build" to the next version, for example
+    # [26.3.build,26.4). Maven then takes the newest build of 26.3.
+    local api_version
+    case "$MC_VERSION" in
+        1.*) api_version="${MC_VERSION}-R0.1-SNAPSHOT" ;;
+        *)   local head="${MC_VERSION%.*}" last="${MC_VERSION##*.}"
+             api_version="[${MC_VERSION}.build,${head}.$((last + 1)))" ;;
+    esac
+    sed -i "s|<paper.version>.*</paper.version>|<paper.version>${api_version}</paper.version>|" \
         "$INSTALL_DIR/plugin-src/pom.xml"
 
     if ! docker run --rm \

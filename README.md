@@ -118,7 +118,7 @@ sudo ACCOUNT_COUNT=30 MC_MEMORY_MB=6144 SETUP_FIREWALL=yes bash install.sh
 | `SERVER_IP` | detected | The LAN address of the server |
 | `MC_PORT` | `25565` | Game port |
 | `RCON_PORT` | `25575` | Console port (host only) |
-| `MC_VERSION` | `1.21.11` | Minecraft version |
+| `MC_VERSION` | `26.3` | Minecraft version |
 | `MC_MEMORY_MB` | `4096` | Memory of the game server |
 | `MC_DISK_MB` | `15360` | Disk of the game server |
 | `MC_SERVER_NAME` | `Serveur ecole` | Name in the panel |
@@ -136,6 +136,11 @@ sudo ACCOUNT_COUNT=30 MC_MEMORY_MB=6144 SETUP_FIREWALL=yes bash install.sh
 | `INSTALL_PORTAINER` | `yes` | `no` skips Portainer |
 | `SETUP_FIREWALL` | `no` | `yes` configures `ufw` |
 | `REMOVE_OLD_STACK` | `yes` | Replaces an old Crafty or itzg stack |
+
+> **Minecraft 26.3:** In September 2026, Paper for 26.3 has only
+> experimental builds. If the server is not stable, use the last stable
+> version: `sudo MC_VERSION=26.2 bash install.sh`. The students must use
+> the same Minecraft version in Prism Launcher. Versions 26.x need Java 25.
 
 > **Caution:** `SETUP_FIREWALL=yes` enables `ufw`. The script opens port 22
 > first. If you use a different SSH port, open it before you run the script.

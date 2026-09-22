@@ -13,9 +13,9 @@
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.release>21</maven.compiler.release>
+    <maven.compiler.release>25</maven.compiler.release>
     <!-- The installer replaces this value with the version of the server. -->
-    <paper.version>1.21.11-R0.1-SNAPSHOT</paper.version>
+    <paper.version>[26.3.build,26.4)</paper.version>
   </properties>
 
   <repositories>
