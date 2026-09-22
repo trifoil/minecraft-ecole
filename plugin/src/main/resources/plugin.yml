@@ -1,0 +1,18 @@
+name: EcoleLogin
+version: 1.0.0
+main: be.ecole.login.EcoleLogin
+api-version: '1.21'
+author: ICET
+description: Login by one chat command, with a user name and a password.
+commands:
+  login:
+    description: Se connecter avec un compte de la classe.
+    usage: /login <utilisateur> <mot de passe>
+  ecolelogin:
+    description: Recharger la liste des comptes.
+    usage: /ecolelogin reload
+    permission: ecolelogin.admin
+permissions:
+  ecolelogin.admin:
+    description: Administration du plugin EcoleLogin.
+    default: op

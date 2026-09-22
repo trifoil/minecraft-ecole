@@ -1,0 +1,17 @@
+# =============================================================================
+#  EcoleLogin — settings
+# =============================================================================
+
+# Seconds before the server kicks a player that does not log in.
+timeout-seconds: 120
+
+# Seconds between two reminder messages.
+reminder-seconds: 6
+
+# true  = after the login, the name in the chat and in the player list
+#         becomes the name of the account.
+# false = the name of the launcher stays.
+rename-on-login: true
+
+# The message that the player sees when the time is over.
+message-timeout: "Temps ecoule. Reconnectez-vous et tapez /login <utilisateur> <mot de passe>."

@@ -10,8 +10,8 @@
 #    3. Pelican Wings      — the daemon that runs each game server
 #    4. Portainer CE       — a web panel for the containers
 #    5. A Paper Minecraft server, in offline mode, made through the panel
-#    6. AuthMeReloaded + PacketEvents — login by chat command
-#    7. 50 student accounts, registered in the server
+#    6. EcoleLogin — a plugin: one command /login <user> <password>
+#    7. 50 student accounts, ready for the login
 #    8. mcadmin            — a command-line tool for the teacher
 #
 #  Run the script as root:
@@ -67,7 +67,11 @@ PASSWORD_ALPHABET='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
 # The old name "pelican-dev" gives "error from registry: denied".
 PANEL_IMAGE="${PANEL_IMAGE:-ghcr.io/pelican/panel:latest}"
 PORTAINER_IMAGE="${PORTAINER_IMAGE:-portainer/portainer-ce:latest}"
+MAVEN_IMAGE="${MAVEN_IMAGE:-maven:3-eclipse-temurin-21}"
 WINGS_URL_BASE="https://github.com/pelican/wings/releases/latest/download"
+
+# The folder that holds this script. The plugin source is next to it.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PAPER_EGG_URL="${PAPER_EGG_URL:-https://raw.githubusercontent.com/pelican-eggs/minecraft/refs/heads/main/java/paper/egg-paper.yaml}"
 
 PANEL_CONTAINER="pelican-panel"
@@ -304,74 +308,8 @@ YAML_TAIL
 }
 
 # ----------------------------------------------------------------------------
-# Step 4 — Templates: AuthMe config, RCON client, PHP bootstrap
+# Step 4 — Templates: RCON client and PHP bootstrap
 # ----------------------------------------------------------------------------
-write_authme_template() {
-    cat > "$INSTALL_DIR/templates/authme-config.yml" <<'EOF'
-# =============================================================================
-#  AuthMeReloaded — login protection for the school server
-#  AuthMe adds the keys that are not in this file when it starts.
-# =============================================================================
-
-DataSource:
-    backend: SQLITE
-    caching: true
-
-settings:
-    messagesLanguage: fr
-
-    sessions:
-        # A player who reconnects in the next 30 minutes skips the login.
-        enabled: true
-        timeout: 30
-
-    registration:
-        # false = a student cannot make an account. The teacher makes them.
-        enabled: false
-        force: true
-
-    restrictions:
-        # A player who is not logged in cannot move, chat or use items.
-        allowMovement: false
-        allowedMovementRadius: 0
-        allowChat: false
-        ProtectInventoryBeforeLogIn: true
-        DenyTabCompleteBeforeLogin: true
-        hideTablistBeforeLogin: true
-        teleportUnAuthedToSpawn: true
-        ForceSingleSession: true
-
-        # The server kicks a name that has no account.
-        kickNonRegistered: true
-
-        # Seconds before the server kicks a player that does not log in.
-        loginTimeout: 90
-        registerTimeout: 90
-        maxLoginTry: 5
-
-        # Many students share one LAN. Do not limit by IP address.
-        maxRegPerIp: 0
-        maxJoinPerIp: 0
-
-        minNicknameLength: 3
-        maxNicknameLength: 16
-        allowedNicknameCharacters: '[a-zA-Z0-9_]*'
-
-        # These commands work before the login.
-        allowCommands:
-        - /login
-        - /l
-        - /register
-        - /reg
-
-    security:
-        minPasswordLength: 5
-        passwordHash: BCRYPT
-
-    unrestrictions:
-        UnrestrictedName: []
-EOF
-}
 
 write_rcon_client() {
     cat > "$INSTALL_DIR/bin/rcon.py" <<'EOF'
@@ -648,7 +586,6 @@ EOF
 
 write_templates() {
     log "Write the templates."
-    write_authme_template
     write_rcon_client
     write_php_bootstrap
     ok "The templates are written."
@@ -951,14 +888,72 @@ wait_for_install() {
 }
 
 # ----------------------------------------------------------------------------
-# Step 8 — Plugins, offline mode and RCON
+# Step 8 — The EcoleLogin plugin, offline mode and RCON
 # ----------------------------------------------------------------------------
-modrinth_url() {
-    local project="$1"
-    curl -fsSL "https://api.modrinth.com/v2/project/${project}/version?loaders=%5B%22paper%22%5D&game_versions=%5B%22${MC_VERSION}%22%5D" \
-        | python3 -c 'import json,sys
-data = json.load(sys.stdin)
-print(data[0]["files"][0]["url"] if data else "")'
+
+# Build the plugin from the source in the folder plugin/.
+build_plugin() {
+    local src="$SCRIPT_DIR/plugin"
+    [ -d "$src" ] || die "The folder plugin/ is not next to install.sh. Clone the full repository."
+
+    pull_image "$MAVEN_IMAGE" "Maven"
+
+    log "Build the EcoleLogin plugin for Minecraft $MC_VERSION."
+    rm -rf "$INSTALL_DIR/plugin-src"
+    cp -a "$src" "$INSTALL_DIR/plugin-src"
+    mkdir -p "$INSTALL_DIR/.m2"
+
+    # Use the API of the same Minecraft version as the server.
+    sed -i "s|<paper.version>.*</paper.version>|<paper.version>${MC_VERSION}-R0.1-SNAPSHOT</paper.version>|" \
+        "$INSTALL_DIR/plugin-src/pom.xml"
+
+    if ! docker run --rm \
+            -v "$INSTALL_DIR/plugin-src":/work -w /work \
+            -v "$INSTALL_DIR/.m2":/root/.m2 \
+            "$MAVEN_IMAGE" mvn -B -q -DskipTests package \
+            > "$INSTALL_DIR/build.log" 2>&1; then
+        tail -30 "$INSTALL_DIR/build.log" >&2
+        cat >&2 <<EOF
+
+ The build needs these hosts:
+   repo.papermc.io          the Paper API
+   repo.maven.apache.org    the Maven tools
+ Test them:
+   curl -sSI https://repo.papermc.io/repository/maven-public/ | head -1
+
+EOF
+        die "The plugin did not build. The log is in $INSTALL_DIR/build.log"
+    fi
+
+    PLUGIN_JAR="$INSTALL_DIR/plugin-src/target/ecole-login.jar"
+    [ -f "$PLUGIN_JAR" ] || die "The jar is not present after the build."
+    ok "The plugin is built: $(basename "$PLUGIN_JAR")"
+}
+
+# Write the list of accounts that the plugin reads.
+# The file holds a salt and a SHA-256 hash, never a password.
+write_accounts_file() {
+    local srv="$1"
+    local out="$srv/plugins/EcoleLogin/accounts.yml"
+    local csv="$INSTALL_DIR/secrets/comptes-eleves.csv"
+
+    mkdir -p "$srv/plugins/EcoleLogin"
+    {
+        printf '# Accounts of the class.\n'
+        printf '# The password is not in this file. Each line holds a salt and\n'
+        printf '# the SHA-256 of salt+password. Use "mcadmin sync" to rebuild it\n'
+        printf '# from %s\n\n' "$csv"
+        local _num user pass salt hash
+        while IFS=, read -r _num user pass; do
+            [ "$user" = "pseudo" ] && continue
+            [ -z "$user" ] && continue
+            pass="${pass%$'\r'}"
+            salt="$(random_secret 16)"
+            hash="$(printf '%s%s' "$salt" "$pass" | sha256sum | awk '{print $1}')"
+            printf '%s:\n  salt: "%s"\n  hash: "%s"\n' "$user" "$salt" "$hash"
+        done < "$csv"
+    } > "$out"
+    chmod 600 "$out"
 }
 
 set_prop() {
@@ -977,25 +972,11 @@ prepare_server_files() {
     local owner
     owner="$(stat -c '%u:%g' "$srv")"
 
-    log "Install AuthMeReloaded and PacketEvents."
-    mkdir -p "$srv/plugins/AuthMe"
-
-    local url
-    url="$(modrinth_url authmereloaded)"
-    [ -n "$url" ] || die "No AuthMe build for Minecraft $MC_VERSION."
-    curl -fsSL -o "$srv/plugins/$(basename "$url")" "$url"
-    ok "$(basename "$url")"
-
-    url="$(modrinth_url packetevents)" || true
-    if [ -n "$url" ]; then
-        curl -fsSL -o "$srv/plugins/$(basename "$url")" "$url"
-        ok "$(basename "$url")"
-    else
-        warn "No PacketEvents build for $MC_VERSION. AuthMe disables the"
-        warn "inventory protection without it."
-    fi
-
-    cp "$INSTALL_DIR/templates/authme-config.yml" "$srv/plugins/AuthMe/config.yml"
+    log "Install the EcoleLogin plugin."
+    mkdir -p "$srv/plugins"
+    cp "$PLUGIN_JAR" "$srv/plugins/ecole-login.jar"
+    write_accounts_file "$srv"
+    ok "The plugin and the accounts are in place."
 
     log "Set offline mode and the console."
     RCON_PASSWORD="$(random_secret 24)"
@@ -1012,7 +993,7 @@ prepare_server_files() {
     set_prop "$props" view-distance 8
     set_prop "$props" difficulty normal
     set_prop "$props" spawn-protection 0
-    set_prop "$props" motd "Serveur de l ecole - tapez /login <mot de passe>"
+    set_prop "$props" motd "Serveur de l ecole - tapez /login <utilisateur> <mot de passe>"
 
     printf 'eula=true\n' > "$srv/eula.txt"
 
@@ -1068,9 +1049,9 @@ generate_accounts() {
         {
             printf -- '---------------------------------------------\n'
             printf -- ' Serveur Minecraft de l ecole\n'
-            printf -- ' Pseudo       : %s\n' "$user"
+            printf -- ' Utilisateur  : %s\n' "$user"
             printf -- ' Mot de passe : %s\n' "$pass"
-            printf -- ' Dans le jeu  : /login %s\n' "$pass"
+            printf -- ' Dans le jeu  : /login %s %s\n' "$user" "$pass"
             printf -- '---------------------------------------------\n\n'
         } >> "$slips"
     done
@@ -1078,13 +1059,12 @@ generate_accounts() {
     ok "The accounts are in $csv"
 }
 
-register_accounts() {
-    log "Register the accounts in AuthMe."
-    awk -F, 'NR>1 && $2 != "" { print "authme register " $2 " " $3 }' \
-        "$INSTALL_DIR/secrets/comptes-eleves.csv" \
-        | "$INSTALL_DIR/bin/rcon.py" 127.0.0.1 "$RCON_PORT" "$RCON_PASSWORD" \
-          >/dev/null || warn "One account was not registered."
-    ok "The accounts are registered."
+verify_accounts() {
+    local srv="$WINGS_DATA/$SERVER_UUID"
+    local count
+    count="$(grep -c '^  hash:' "$srv/plugins/EcoleLogin/accounts.yml" || true)"
+    [ "$count" -gt 0 ] || die "The file accounts.yml is empty."
+    ok "$count accounts are ready for the login."
 }
 
 # ----------------------------------------------------------------------------
@@ -1125,10 +1105,10 @@ mcadmin — manage the school game server
 
   STUDENT ACCOUNTS
     mcadmin accounts                Show the account list
-    mcadmin register                Register all accounts of the CSV
-    mcadmin add <pseudo> [pwd]      Make one more account
-    mcadmin passwd <pseudo> <pwd>   Change a password
-    mcadmin remove <pseudo>         Delete an account
+    mcadmin sync                    Rebuild accounts.yml from the CSV
+    mcadmin add <user> [pwd]        Make one more account
+    mcadmin passwd <user> <pwd>     Change a password
+    mcadmin remove <user>           Delete an account
 
   FILES
     mcadmin files                   Show the folder of the server
@@ -1151,6 +1131,40 @@ load_rcon() {
 rcon_run() { load_rcon; "$RCON" 127.0.0.1 "$RCON_PORT" "$RCON_PASSWORD" "$@"; }
 pboot()    { docker exec -i "$PANEL_CONTAINER" php "$BOOT" "$@"; }
 power()    { load_rcon; pboot server:power "$SERVER_UUID" "$1"; }
+
+salt16() {
+    local s=""
+    s="$(LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom | head -c 16)" || true
+    printf '%s\n' "$s"
+}
+
+# Rebuild plugins/EcoleLogin/accounts.yml from the CSV, then tell the plugin
+# to read it again. The password is never written in the file.
+sync_accounts() {
+    load_rcon
+    local srv="$WINGS_DATA/$SERVER_UUID"
+    local out="$srv/plugins/EcoleLogin/accounts.yml"
+    [ -d "$srv" ] || { echo "The server folder is not present." >&2; exit 1; }
+    mkdir -p "$srv/plugins/EcoleLogin"
+
+    local owner _num user pass salt hash
+    owner="$(stat -c '%u:%g' "$srv")"
+    {
+        printf '# Accounts of the class. Rebuilt by "mcadmin sync".\n\n'
+        while IFS=, read -r _num user pass; do
+            [ "$user" = "pseudo" ] && continue
+            [ -z "$user" ] && continue
+            pass="${pass%$'\r'}"
+            salt="$(salt16)"
+            hash="$(printf '%s%s' "$salt" "$pass" | sha256sum | awk '{print $1}')"
+            printf '%s:\n  salt: "%s"\n  hash: "%s"\n' "$user" "$salt" "$hash"
+        done < "$CSV"
+    } > "$out"
+    chmod 600 "$out"
+    chown "$owner" "$out" 2>/dev/null || true
+    "$RCON" 127.0.0.1 "$RCON_PORT" "$RCON_PASSWORD" ecolelogin reload >/dev/null 2>&1 \
+        || echo "The server is stopped. The accounts load at the next start."
+}
 
 case "${1:-}" in
   start|stop|restart|kill) power "$1"; echo "The action $1 is sent." ;;
@@ -1187,28 +1201,31 @@ case "${1:-}" in
       ;;
 
   accounts) column -s, -t < "$CSV" 2>/dev/null || cat "$CSV" ;;
-  register)
-      load_rcon
-      awk -F, 'NR>1 && $2 != "" { print "authme register " $2 " " $3 }' "$CSV" \
-        | "$RCON" 127.0.0.1 "$RCON_PORT" "$RCON_PASSWORD"
-      echo "The accounts of $CSV are registered."
-      ;;
+  sync)     sync_accounts; echo "The accounts are rebuilt from $CSV." ;;
   add)
-      [ $# -ge 2 ] || { echo "Use: mcadmin add <pseudo> [password]"; exit 1; }
+      [ $# -ge 2 ] || { echo "Use: mcadmin add <user> [password]"; exit 1; }
       USER="$2"; PASS="${3:-$(newpass)}"
-      rcon_run authme register "$USER" "$PASS"
+      if awk -F, -v u="$USER" 'NR>1 && $2 == u {found=1} END {exit !found}' "$CSV"; then
+          echo "The account $USER is already in the list. Use: mcadmin passwd"; exit 1
+      fi
       printf '%s,%s,%s\n' "$(wc -l < "$CSV")" "$USER" "$PASS" >> "$CSV"
+      sync_accounts
       echo "Account $USER is made. Password: $PASS"
       ;;
   passwd)
-      [ $# -eq 3 ] || { echo "Use: mcadmin passwd <pseudo> <password>"; exit 1; }
-      rcon_run authme password "$2" "$3"
-      echo "The password of $2 is changed. Write it in $CSV."
+      [ $# -eq 3 ] || { echo "Use: mcadmin passwd <user> <password>"; exit 1; }
+      awk -F, -v OFS=, -v u="$2" -v p="$3" \
+          'NR==1 || $2 != u {print; next} {$3 = p; print}' "$CSV" > "$CSV.new"
+      mv "$CSV.new" "$CSV"; chmod 600 "$CSV"
+      sync_accounts
+      echo "The password of $2 is changed."
       ;;
   remove)
-      [ $# -eq 2 ] || { echo "Use: mcadmin remove <pseudo>"; exit 1; }
-      rcon_run authme unregister "$2"
-      echo "The account $2 is deleted. Remove the line from $CSV."
+      [ $# -eq 2 ] || { echo "Use: mcadmin remove <user>"; exit 1; }
+      awk -F, -v u="$2" 'NR==1 || $2 != u' "$CSV" > "$CSV.new"
+      mv "$CSV.new" "$CSV"; chmod 600 "$CSV"
+      sync_accounts
+      echo "The account $2 is deleted."
       ;;
 
   files) load_rcon; echo "$WINGS_DATA/$SERVER_UUID" ;;
@@ -1267,11 +1284,12 @@ ${C_OK}===============================================================${C_OFF}
  Printable slips   : $INSTALL_DIR/secrets/comptes-eleves.txt
 
  How a student connects:
-   1. In Prism Launcher, set the account name to the pseudo, for
-      example "${ACCOUNT_PREFIX}01". The name must match exactly.
-   2. Join $SERVER_IP:$MC_PORT. The player cannot move and cannot chat.
-   3. In the chat, type:  /login <password>
-   4. After the login, the player can play.
+   1. In Prism Launcher, make an offline account. The name is free,
+      but two students cannot use the same name at the same time.
+   2. Join $SERVER_IP:$MC_PORT. The player cannot move.
+   3. In the chat, type:  /login <user> <password>
+      for example:        /login ${ACCOUNT_PREFIX}01 xxxxxxxxxx
+   4. After the login, the name in the chat becomes the account name.
 
  Useful commands:
    mcadmin status         Show the state of everything
@@ -1312,15 +1330,16 @@ main() {
     install_wings
     wait_for_wings
 
+    build_plugin
     import_egg
     create_allocations
     create_server
     wait_for_install
 
     prepare_server_files
+    verify_accounts
     start_server
     wait_for_minecraft
-    register_accounts
 
     install_cli
     setup_firewall

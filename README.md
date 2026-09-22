@@ -19,13 +19,21 @@ the 50 student accounts are registered. **No step in a browser.**
 | Pelican Panel (container) | Web panel: servers, console, files, backups | 80, 443 |
 | Pelican Wings (systemd) | Daemon that runs each game server | 8080, 2022 |
 | Paper Minecraft server | The school server, in offline mode | 25565 |
-| AuthMeReloaded + PacketEvents | Login by chat command | — |
+| EcoleLogin (plugin, in `plugin/`) | One command: `/login <user> <password>` | — |
 | Portainer CE (container) | Web panel for the containers | 9443 |
 | `mcadmin` | Command-line tool for the teacher | — |
 
 The clients are not official, so the server runs in **offline mode**. A player
-who joins cannot move, cannot chat and cannot touch the world. The player must
-first type `/login <password>` in the chat.
+who joins cannot move and cannot touch the world. The player types one command
+in the chat:
+
+```
+/login <utilisateur> <mot de passe>
+```
+
+The account is **not** the name of the launcher. A student keeps the pseudo of
+his choice, and proves who he is with the pair on his slip. The plugin that
+does this is in the folder `plugin/`, with its source.
 
 ### Why Pelican and not Pterodactyl
 
@@ -51,6 +59,7 @@ own code, not with a browser robot.
 | Wings configuration | `$node->getYamlConfiguration()` writes `/etc/pelican/config.yml` |
 | Add the ports | `App\Services\Allocations\AssignmentService` |
 | Import the Paper egg | `App\Services\Eggs\Sharing\EggImporterService::fromUrl()` |
+| Build the login plugin | `mvn package` in a temporary Maven container |
 | Create the server | `App\Services\Servers\ServerCreationService::handle()` |
 | Start the server | `App\Repositories\Daemon\DaemonServerRepository::power('start')` |
 
@@ -77,8 +86,10 @@ pass:
 | `ghcr.io` | The panel image, and the Java images of the game servers |
 | `github.com` | The Wings binary |
 | `raw.githubusercontent.com` | The Paper egg |
-| `api.modrinth.com` and `cdn.modrinth.com` | AuthMe and PacketEvents |
 | `fill.papermc.io` | The Paper server jar |
+| `repo.papermc.io` | The Paper API, to build the login plugin |
+| `repo.maven.apache.org` | The Maven tools |
+| `docker.io` | Portainer and the Maven image |
 
 ---
 
@@ -158,12 +169,17 @@ database in clear text.**
 
 ### How a student connects
 
-1. In Prism Launcher, make an offline account. The name must be exactly the
-   pseudo on the slip, for example `eleve07`.
+1. In Prism Launcher, make an offline account. **The name is free.** Two
+   students cannot use the same name at the same time, because Minecraft
+   makes the identity of a player from that name.
 2. Add the server: `<server-ip>:25565`.
-3. Join. The screen is dark and the player cannot move.
-4. In the chat, type: `/login <password>`
-5. The player can now play.
+3. Join. The player cannot move.
+4. In the chat, type: `/login <user> <password>`, for example
+   `/login eleve07 K7mNp2rQxZ`
+5. The player can now play. The name in the chat and in the player list
+   becomes `eleve07`, so you see who is who.
+
+A player who does not log in is kicked after 120 seconds.
 
 ### Texte pour les eleves (francais)
 
@@ -171,10 +187,11 @@ database in clear text.**
 Serveur Minecraft de l'ecole
 
 1. Dans Prism Launcher, cree un compte hors-ligne.
-   Le pseudo doit etre exactement celui de ta fiche.
+   Tu choisis le pseudo que tu veux.
 2. Ajoute le serveur : <adresse-du-serveur>:25565
 3. Rejoins le serveur. Tu ne peux pas bouger.
-4. Dans le chat, tape :  /login <ton-mot-de-passe>
+4. Dans le chat, tape :  /login <utilisateur> <mot de passe>
+   Les deux sont sur ta fiche.
 5. Tu peux jouer.
 
 Ne donne jamais ton mot de passe a un autre eleve.
@@ -199,10 +216,10 @@ PANEL AND DAEMON
 
 STUDENT ACCOUNTS
   mcadmin accounts                Show the account list
-  mcadmin register                Register all accounts of the CSV
-  mcadmin add <pseudo> [pwd]      Make one more account
-  mcadmin passwd <pseudo> <pwd>   Change a password
-  mcadmin remove <pseudo>         Delete an account
+  mcadmin sync                    Rebuild accounts.yml from the CSV
+  mcadmin add <user> [pwd]        Make one more account
+  mcadmin passwd <user> <pwd>     Change a password
+  mcadmin remove <user>           Delete an account
 
 FILES
   mcadmin files                   Show the folder of the server
@@ -243,9 +260,9 @@ server needs the same mods on each student computer.
 Egg**, import the CurseForge or Modrinth modpack egg, then make a server with
 it and give the modpack ID.
 
-> **Important for a mod or modpack server:** AuthMeReloaded is a Paper plugin.
+> **Important for a mod or modpack server:** EcoleLogin is a Paper plugin.
 > It does not work on Fabric or Forge. For those servers, use a whitelist, or
-> a different login mod, or a separate lesson with no login.
+> a separate lesson with no login.
 
 > **Ports:** each new server needs its own allocation. In the panel, open
 > **Admin → Nodes → local → Allocations** and add more ports, for example
@@ -292,12 +309,15 @@ sudo docker restart portainer-ecole
 
 **What the setup protects against**
 
-- A student who uses the pseudo of another student is blocked at the login.
-- A student who does not have an account is kicked (`kickNonRegistered`).
-- A player who is not logged in cannot move, chat, or use the inventory.
-  PacketEvents gives the inventory and tab-complete protection; the script
-  installs it.
-- Passwords are stored with BCRYPT in an SQLite database.
+- A student who does not know a pair user/password cannot play.
+- The error message is the same for a wrong user and for a wrong password.
+  It gives no information to a student that tries many names.
+- A player who is not logged in cannot move, break or place a block, use an
+  item, open the inventory, pick up or drop an item, or take damage. Every
+  command except `/login` is blocked.
+- One account can be used by one player at a time.
+- Passwords are stored as a salt and a SHA-256 hash, one salt per account.
+  The clear passwords exist only in `secrets/comptes-eleves.csv`.
 - The console port (25575) and the daemon port (8080) stay closed in the
   firewall rules. They are used on the host only.
 
@@ -311,14 +331,27 @@ sudo docker restart portainer-ecole
 - Wings runs as root and it controls Docker. Give the panel administrator
   account to teachers only.
 
-**Session length**
+**The chat before the login**
 
-After a login, a reconnection in the next 30 minutes does not ask for the
-password again. Change `settings.sessions.timeout` in the file
-`plugins/AuthMe/config.yml` of the server, then:
+A player that is not logged in can still write in the chat. That is what you
+asked for, because the login is a chat command. The risk is small but real: a
+student can type his password in the chat by mistake, and the others see it.
+Tell the students to look at the line before they press Enter.
+
+**Settings of the plugin**
+
+The file is `plugins/EcoleLogin/config.yml` in the server folder:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `timeout-seconds` | `120` | Seconds before the kick |
+| `reminder-seconds` | `6` | Seconds between two reminders |
+| `rename-on-login` | `true` | Show the account name after the login |
+
+After a change:
 
 ```bash
-mcadmin console "authme reload"
+mcadmin console "ecolelogin reload"
 ```
 
 ---
@@ -331,7 +364,8 @@ mcadmin console "authme reload"
 ├── docker-compose.yml            Panel and Portainer
 ├── bin/rcon.py                   Small RCON client (standard library only)
 ├── bin/school-bootstrap.php      Headless setup of the panel
-├── templates/authme-config.yml   Model configuration for AuthMe
+├── plugin-src/                   Copy of plugin/, and the built jar
+├── build.log                     Log of the plugin build
 ├── backups/                      Made by "mcadmin backup"
 └── secrets/
     ├── panel-admin.txt           Panel login
@@ -341,7 +375,20 @@ mcadmin console "authme reload"
 
 /etc/pelican/config.yml           Wings configuration
 /var/lib/pelican/volumes/<uuid>   The files of one game server
+  plugins/ecole-login.jar           The login plugin
+  plugins/EcoleLogin/accounts.yml   Salt and hash of each account
+  plugins/EcoleLogin/config.yml     Settings of the plugin
 /etc/systemd/system/wings.service
+```
+
+The repository also holds the source of the plugin:
+
+```
+plugin/
+├── pom.xml
+└── src/main/java/be/ecole/login/EcoleLogin.java
+    src/main/resources/plugin.yml
+    src/main/resources/config.yml
 ```
 
 ---
@@ -376,8 +423,26 @@ No answer means that a filter blocks the host. Ask the network administrator
 to allow `ghcr.io`. The game servers also need it, for the Java images.
 
 **The script stops at the migrations.**
-Read `/opt/minecraft-ecole/migrate.log`. A common cause is no network in the
-panel container. See the DNS part below.
+Read `/opt/minecraft-ecole/migrate.log`. If the database is in a bad state
+after a failed run, clean it and start again:
+
+```bash
+cd /opt/minecraft-ecole
+sudo docker compose down -v
+sudo bash install.sh
+```
+
+`down -v` deletes the panel database only. The account list is in
+`secrets/`, and the script keeps it.
+
+A `no such table` error means that the panel tried to use the database for
+the cache or the session before the migration made those tables. The script
+sets `CACHE_STORE=file` and `SESSION_DRIVER=file` to prevent this. Check
+those two lines if you changed them:
+
+```bash
+sudo docker exec pelican-panel grep -E 'CACHE_STORE|SESSION_DRIVER' /pelican-data/.env
+```
 
 **The script stops at "The Paper egg was not imported".**
 The panel container cannot reach `raw.githubusercontent.com`. The panel gives
@@ -411,9 +476,20 @@ mcadmin panel logs
 
 Stop the other web server, or run the script with `PANEL_HTTP_PORT=8081`.
 
-**A student sees "You are not registered".**
-The pseudo does not match. Check the exact spelling with `mcadmin accounts`.
-Prism Launcher must use that exact name.
+**A student sees "Utilisateur ou mot de passe incorrect".**
+Check the pair with `mcadmin accounts`. The user name is not the name of the
+launcher: it is the first word after `/login`.
+
+**A student sees "Ce compte est deja utilise par un autre joueur".**
+Two students use the same account. Give each student his own slip.
+
+**The script stops at "The plugin did not build".**
+Read `/opt/minecraft-ecole/build.log`. The build needs `repo.papermc.io` and
+`repo.maven.apache.org`. Test them:
+
+```bash
+curl -sSI https://repo.papermc.io/repository/maven-public/ | head -1
+```
 
 **A container cannot resolve a name
 ("Temporary failure in name resolution").**
@@ -487,8 +563,7 @@ This deletes every world and every account. Make a backup first.
 - Pelican Panel — MIT — <https://pelican.dev>
 - Pelican Wings — MIT — <https://github.com/pelican-dev/wings>
 - Paper — GPL-3.0 — <https://papermc.io>
-- AuthMeReloaded — GPL-3.0 — <https://modrinth.com/plugin/authmereloaded>
-- PacketEvents — GPL-3.0 — <https://modrinth.com/plugin/packetevents>
+- EcoleLogin — the plugin of this repository, folder `plugin/`
 - Portainer CE — zlib — <https://www.portainer.io>
 
 Minecraft is a product of Mojang Studios. Each player needs a licence of the
