@@ -117,6 +117,22 @@ detect_ip() {
     ok "The address of the server is $SERVER_IP."
 }
 
+check_disk() {
+    local free_root free_var
+    free_root="$(df -Pm / | awk 'NR==2 {print $4}')"
+    free_var="$(df -Pm /var/lib | awk 'NR==2 {print $4}')"
+    ok "Free space: ${free_root} MB on / and ${free_var} MB on /var/lib."
+    if [ "$free_root" -lt 3000 ]; then
+        printf '\n' >&2
+        df -h / /var /usr /tmp 2>/dev/null | sed 's/^/   /' >&2
+        printf '\n Clean the old images and containers:\n' >&2
+        printf '   sudo docker system prune -af --volumes\n\n' >&2
+        die "Only ${free_root} MB free on /. The installation needs 6000 MB or more."
+    fi
+    [ "$free_root" -ge 6000 ] || \
+        warn "Only ${free_root} MB free on /. The installation needs about 6000 MB."
+}
+
 detect_resources() {
     if [ "$NODE_MEMORY_MB" -eq 0 ]; then
         NODE_MEMORY_MB="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
@@ -779,8 +795,31 @@ install_wings() {
         aarch64) asset="wings_linux_arm64" ;;
         *) die "The processor $arch is not supported by Wings." ;;
     esac
-    curl -fsSL -o /usr/local/bin/wings "${WINGS_URL_BASE}/${asset}"
-    chmod u+x /usr/local/bin/wings
+
+    # Stop the service first. A running binary cannot be replaced.
+    systemctl stop wings 2>/dev/null || true
+
+    # Download to a temporary file, then put it in place. The binary is about
+    # 40 MB. A partial file must never stay in /usr/local/bin.
+    local tmp
+    tmp="$(mktemp /tmp/wings.XXXXXX)"
+    if ! curl -fL --retry 3 --retry-delay 3 -o "$tmp" "${WINGS_URL_BASE}/${asset}"; then
+        rm -f "$tmp"
+        printf '\n Free space:\n' >&2
+        df -h / /tmp /usr /var 2>/dev/null | sed 's/^/   /' >&2
+        printf '\n' >&2
+        die "The Wings binary did not download. Look at the free space above."
+    fi
+
+    local size
+    size="$(stat -c %s "$tmp")"
+    if [ "$size" -lt 5000000 ]; then
+        rm -f "$tmp"
+        die "The Wings binary is too small ($size bytes). The download was cut."
+    fi
+    install -m 0755 "$tmp" /usr/local/bin/wings
+    rm -f "$tmp"
+    ok "The Wings binary is in place ($((size / 1024 / 1024)) MB)."
 
     log "Write /etc/pelican/config.yml from the panel."
     pboot node:config "$NODE_ID" > /etc/pelican/config.yml
@@ -1308,6 +1347,7 @@ main() {
     require_root
     check_debian
     detect_ip
+    check_disk
     detect_resources
 
     install_docker
