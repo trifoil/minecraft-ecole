@@ -277,9 +277,41 @@ it and give the modpack ID.
 The main tool. Console, files, backups, players, start and stop.
 
 ```bash
-mcadmin admin        # show the login and the password
+sudo mcadmin admin   # show the login and the password
 mcadmin panel logs   # the panel logs
 ```
+
+#### Find the panel password
+
+The installer makes the administrator account with a random password. It
+writes the password in one file:
+
+```
+/opt/minecraft-ecole/secrets/panel-admin.txt
+```
+
+The file has mode `600` and root is the owner. Thus you must use `sudo`.
+Use one of these commands:
+
+```bash
+sudo mcadmin admin
+sudo cat /opt/minecraft-ecole/secrets/panel-admin.txt
+```
+
+The output shows the URL, the user name, the email and the password:
+
+```
+Pelican Panel administrator
+  URL      : http://<server-ip>
+  User     : admin
+  Email    : admin@ecole.local
+  Password : <random password>
+```
+
+On the login page, type the user name or the email, and then the password.
+
+The installer also shows the path of this file at the end of the
+installation. A second run of `install.sh` does not change the password.
 
 If you lose the password, make a second administrator:
 
