@@ -109,7 +109,7 @@ file.
 ### Change the defaults
 
 ```bash
-sudo ACCOUNT_COUNT=30 MC_MEMORY_MB=6144 SETUP_FIREWALL=yes bash install.sh
+sudo ACCOUNT_COUNT=30 SETUP_FIREWALL=yes bash install.sh
 ```
 
 | Variable | Default | Purpose |
@@ -119,8 +119,10 @@ sudo ACCOUNT_COUNT=30 MC_MEMORY_MB=6144 SETUP_FIREWALL=yes bash install.sh
 | `MC_PORT` | `25565` | Game port |
 | `RCON_PORT` | `25575` | Console port (host only) |
 | `MC_VERSION` | `26.3` | Minecraft version |
-| `MC_MEMORY_MB` | `4096` | Memory of the game server |
-| `MC_DISK_MB` | `15360` | Disk of the game server |
+| `MC_MEMORY_MB` | `auto` | Memory of the game server. See part 7 |
+| `MEMORY_RESERVE_MB` | `1536` | Memory kept for the rest of the machine |
+| `MC_DISK_MB` | `0` | Disk limit of the game server. `0` = no limit |
+| `MC_IO_WEIGHT` | `1000` | Disk priority of the game server (10 to 1000) |
 | `MC_SERVER_NAME` | `Serveur ecole` | Name in the panel |
 | `MC_JAVA_IMAGE` | `…/yolks:java_25` | Java image of the server |
 | `ACCOUNT_COUNT` | `50` | Number of student accounts |
@@ -219,6 +221,11 @@ PANEL AND DAEMON
   mcadmin admin                   Show the panel administrator account
   mcadmin status                  Show the state of everything
 
+RESOURCES
+  mcadmin resources               Show the limits and the live use
+  mcadmin resize [auto|<MB>]      Give the server all the memory (auto),
+                                  or a number of MB. Then it restarts.
+
 STUDENT ACCOUNTS
   mcadmin accounts                Show the account list
   mcadmin sync                    Rebuild accounts.yml from the CSV
@@ -245,7 +252,112 @@ Press `Ctrl+C` to stop a log view.
 
 ---
 
-## 7. Plugins, mods and modpacks
+## 7. Resources — CPU, memory and disk
+
+### What each container can use
+
+| Container | CPU | Memory | Disk |
+|---|---|---|---|
+| Minecraft server (made by Wings) | all cores, no quota | **all the memory minus a reserve** | no limit |
+| `pelican-panel` | no limit | no limit | no limit |
+| `portainer-ecole` | no limit | no limit | no limit |
+| Maven build (temporary) | no limit | no limit | no limit |
+| Wings install container (temporary) | 1 core | 1024 MB | — |
+
+The panel and Portainer have no limit, but they use little: about 300 to
+500 MB for the panel, and 50 MB for Portainer.
+
+### Why the game server does not get 100 % of the memory
+
+The memory is the only resource that the script does not give fully. The
+reason is physical: the game server, the panel, Wings, Docker and Debian
+share the same memory. If the game server takes all of it, Linux stops a
+program to free memory, and that program can be the panel or Wings.
+
+So the script calculates the size:
+
+```
+container memory = total memory − MEMORY_RESERVE_MB (1536 MB)
+```
+
+Wings adds a margin to the server value, to protect Java: +15 % up to
+2048 MB, +10 % up to 4096 MB, +5 % above. The script calculates the server
+value so that the container, with its margin, fills the free memory exactly.
+Java then takes 95 % of the container (`-XX:MaxRAMPercentage=95`).
+
+| Machine | Server value | Container | Left for the rest |
+|---|---|---|---|
+| 3825 MB (your VM) | 2080 MB | 2288 MB | 1537 MB |
+| 4 GB | 2327 MB | 2559 MB | 1537 MB |
+| 6 GB | 4388 MB | 4607 MB | 1537 MB |
+| 8 GB | 6339 MB | 6655 MB | 1537 MB |
+| 16 GB | 14140 MB | 14847 MB | 1537 MB |
+
+### The CPU
+
+The server has **no CPU quota** (`cpu = 0`) and **no core pinning**
+(`threads` empty). Wings then gives no CPU limit to Docker, so the container
+can use every core of the machine. Paper uses several cores for the chunks,
+the network and the garbage collector.
+
+### The disk
+
+`MC_DISK_MB=0` means no limit. The world can grow until the disk is full.
+Watch the free space with `mcadmin resources`, and make backups on another
+disk. To set a limit, for example 15 GB:
+
+```bash
+sudo MC_DISK_MB=15360 bash install.sh
+```
+
+The IO weight is 1000, the maximum. When the panel and the game server read
+the disk at the same time, the game server goes first.
+
+### No swap
+
+The server has no swap (`swap = 0`). With swap, Java moves parts of the
+world to the disk, and the game lags for all the players. It is better to
+give the machine more memory.
+
+### Check it
+
+```bash
+mcadmin resources
+```
+
+It shows the machine, the values in the panel, the real limits of the Docker
+container, and the live use of each container.
+
+### Give the server more memory later
+
+If you give the VM more memory in Proxmox, the server does not use it
+automatically. Tell it:
+
+```bash
+mcadmin resize          # auto: all the memory minus the reserve
+mcadmin resize 6144     # or an exact value in MB
+```
+
+The command restarts the server, because Java reads its limit only when it
+starts. Tell the students before you do it.
+
+### The layer above: the Proxmox VM
+
+The containers can use only what the VM has. In Proxmox, on the VM:
+
+| Setting | Value | Why |
+|---|---|---|
+| Processors / Type | `host` | Java uses all the instructions of the real CPU |
+| Processors / Cores | all the cores you can give | Paper uses several cores |
+| Memory / Ballooning | **off** | Wings sets a fixed limit at the start. If Proxmox takes memory back later, Java does not know it and the server stops |
+| Hard disk / Discard | on (with SSD) | The free space goes back to the host |
+
+After a change of memory or of cores in Proxmox, restart the VM, then run
+`mcadmin resize`.
+
+---
+
+## 8. Plugins, mods and modpacks
 
 The panel keeps a **file manager**, a **console**, a **backup** tool and a
 **startup** tab for each server.
@@ -275,7 +387,7 @@ it and give the modpack ID.
 
 ---
 
-## 8. The two web panels
+## 9. The two web panels
 
 ### Pelican Panel — `http://<server-ip>`
 
@@ -342,7 +454,7 @@ sudo docker restart portainer-ecole
 
 ---
 
-## 9. Security notes
+## 10. Security notes
 
 **What the setup protects against**
 
@@ -393,7 +505,7 @@ mcadmin console "ecolelogin reload"
 
 ---
 
-## 10. Files and folders
+## 11. Files and folders
 
 ```
 /opt/minecraft-ecole/
@@ -430,7 +542,7 @@ plugin/
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 **The script stops with "error from registry: denied".**
 
@@ -566,7 +678,7 @@ blocks.
 
 ---
 
-## 12. Backups
+## 13. Backups
 
 ```bash
 mcadmin backup
@@ -580,7 +692,7 @@ folder.
 
 ---
 
-## 13. Remove the stack
+## 14. Remove the stack
 
 ```bash
 cd /opt/minecraft-ecole
@@ -595,7 +707,7 @@ This deletes every world and every account. Make a backup first.
 
 ---
 
-## 14. Licences and sources
+## 15. Licences and sources
 
 - Pelican Panel — MIT — <https://pelican.dev>
 - Pelican Wings — MIT — <https://github.com/pelican-dev/wings>
