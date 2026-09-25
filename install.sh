@@ -41,8 +41,15 @@ WINGS_DATA="${WINGS_DATA:-/var/lib/pelican/volumes}"
 MC_PORT="${MC_PORT:-25565}"
 RCON_PORT="${RCON_PORT:-25575}"
 MC_VERSION="${MC_VERSION:-26.3}"
-MC_MEMORY_MB="${MC_MEMORY_MB:-4096}"
-MC_DISK_MB="${MC_DISK_MB:-15360}"
+# Resources of the game server.
+#   MC_MEMORY_MB=auto : all the memory of the machine, minus MEMORY_RESERVE_MB
+#                       for Debian, Docker, Wings, the panel and Portainer.
+#   MC_DISK_MB=0      : no disk limit. The server can use all the free disk.
+#   CPU               : no limit, all the cores. This is fixed below.
+MC_MEMORY_MB="${MC_MEMORY_MB:-auto}"
+MC_DISK_MB="${MC_DISK_MB:-0}"
+MEMORY_RESERVE_MB="${MEMORY_RESERVE_MB:-1536}"
+MC_IO_WEIGHT="${MC_IO_WEIGHT:-1000}"     # 10..1000. 1000 = first on the disk
 MC_SERVER_NAME="${MC_SERVER_NAME:-Serveur ecole}"
 MC_JAVA_IMAGE="${MC_JAVA_IMAGE:-ghcr.io/pelican-eggs/yolks:java_25}"
 
@@ -133,6 +140,26 @@ check_disk() {
         warn "Only ${free_root} MB free on /. The installation needs about 6000 MB."
 }
 
+# Wings gives the container more memory than the server value, to protect
+# Java: +15 % up to 2048 MB, +10 % up to 4096 MB, +5 % above. Source:
+# wings/config/config_docker.go, Overhead.GetMultiplier().
+wings_container_mb() {
+    local m="$1"
+    if   [ "$m" -le 2048 ]; then echo $(( m * 115 / 100 ))
+    elif [ "$m" -le 4096 ]; then echo $(( m * 110 / 100 ))
+    else                          echo $(( m * 105 / 100 ))
+    fi
+}
+
+# The largest server memory whose container still fits in the free memory.
+auto_server_memory() {
+    local avail=$(( NODE_MEMORY_MB - MEMORY_RESERVE_MB )) m
+    m=$(( avail * 100 / 105 ))
+    [ "$m" -gt 4096 ] || m=$(( avail * 100 / 110 ))
+    [ "$m" -gt 2048 ] || m=$(( avail * 100 / 115 ))
+    echo "$m"
+}
+
 detect_resources() {
     if [ "$NODE_MEMORY_MB" -eq 0 ]; then
         NODE_MEMORY_MB="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
@@ -141,6 +168,32 @@ detect_resources() {
         NODE_DISK_MB="$(df -Pm /var/lib | awk 'NR==2 {print $2}')"
     fi
     ok "The node offers ${NODE_MEMORY_MB} MB of memory and ${NODE_DISK_MB} MB of disk."
+
+    if [ "$MC_MEMORY_MB" = "auto" ]; then
+        MC_MEMORY_MB="$(auto_server_memory)"
+    fi
+    case "$MC_MEMORY_MB" in
+        ''|*[!0-9]*) die "MC_MEMORY_MB must be a number or \"auto\"." ;;
+    esac
+    [ "$MC_MEMORY_MB" -ge 1024 ] || \
+        die "Only ${MC_MEMORY_MB} MB for the game server. Give the machine more memory, or lower MEMORY_RESERVE_MB."
+
+    local container cores
+    container="$(wings_container_mb "$MC_MEMORY_MB")"
+    cores="$(nproc)"
+    if [ "$container" -gt "$NODE_MEMORY_MB" ]; then
+        warn "The container needs ${container} MB, but the machine has ${NODE_MEMORY_MB} MB."
+        warn "Use MC_MEMORY_MB=auto."
+    fi
+
+    ok "Game server: ${MC_MEMORY_MB} MB (container ${container} MB, Java takes 95 %)."
+    ok "Game server: ${cores} CPU cores, no CPU limit."
+    if [ "$MC_DISK_MB" -eq 0 ]; then
+        ok "Game server: no disk limit."
+    else
+        ok "Game server: disk limit ${MC_DISK_MB} MB."
+    fi
+    ok "Reserve for Debian, Docker, Wings, the panel and Portainer: $(( NODE_MEMORY_MB - container )) MB."
 }
 
 # The "|| true" is necessary, because "head" closes the pipe and "tr" stops.
@@ -424,6 +477,8 @@ write_php_bootstrap() {
  *                                          <diskMB> <mcVersion> <image>
  *   php school-bootstrap.php server:status <uuid>
  *   php school-bootstrap.php server:power  <uuid> <start|stop|restart|kill>
+ *   php school-bootstrap.php server:build  <uuid> <memMB> <diskMB> <ioWeight>
+ *   php school-bootstrap.php server:show   <uuid>
  */
 
 require '/var/www/html/vendor/autoload.php';
@@ -438,6 +493,7 @@ use App\Models\User;
 use App\Repositories\Daemon\DaemonServerRepository;
 use App\Services\Allocations\AssignmentService;
 use App\Services\Eggs\Sharing\EggImporterService;
+use App\Services\Servers\BuildModificationService;
 use App\Services\Servers\ServerCreationService;
 use Illuminate\Support\Arr;
 
@@ -477,6 +533,12 @@ try {
                     'daemon_listen' => (int) $listen,
                     'daemon_connect' => (int) $listen,
                     'daemon_sftp' => (int) $sftp,
+                ]);
+            } else {
+                // A second run: the machine can have more memory or disk now.
+                $node->update([
+                    'memory' => (int) $memory,
+                    'disk' => (int) $disk,
                 ]);
             }
             echo $node->id, PHP_EOL;
@@ -528,7 +590,7 @@ try {
 
         case 'server:create':
             [$nodeId, $eggId, $email, $name, $gamePort, $rconPort,
-             $memory, $disk, $version, $image] = array_slice($argv, 2, 10);
+             $memory, $disk, $version, $image, $io] = array_slice($argv, 2, 11) + array_fill(0, 11, null);
 
             $existing = Server::query()->where('name', $name)->first();
             if ($existing) {
@@ -556,10 +618,14 @@ try {
                 'egg_id' => $egg->id,
                 'allocation_id' => $primary->id,
                 'allocation_additional' => [$extra->id],
+                // cpu 0 and threads null: no CPU quota and no core pinning.
+                // Wings then gives the container all the cores of the machine.
+                // disk 0: no disk limit. swap 0: no swap, because swap makes
+                // a Minecraft server lag.
                 'memory' => (int) $memory,
                 'swap' => 0,
                 'disk' => (int) $disk,
-                'io' => 500,
+                'io' => (int) ($io ?? 1000),
                 'cpu' => 0,
                 'threads' => null,
                 'oom_killer' => false,
@@ -589,6 +655,38 @@ try {
             $server = Server::query()->where('uuid', $argv[2])->firstOrFail();
             app(DaemonServerRepository::class)->setServer($server)->power($argv[3]);
             echo 'sent', PHP_EOL;
+            break;
+
+        case 'server:build':
+            // Change the limits of a server that exists. The panel sends the
+            // new values to Wings. Java reads its limit when it starts, so a
+            // restart of the server is necessary.
+            [$uuid, $memory, $disk, $io] = array_slice($argv, 2, 4) + [null, null, null, null];
+            $server = Server::query()->where('uuid', $uuid)->firstOrFail();
+            app(BuildModificationService::class)->handle($server, [
+                'memory' => (int) $memory,
+                'swap' => 0,
+                'disk' => (int) $disk,
+                'io' => (int) $io,
+                'cpu' => 0,
+                'threads' => null,
+                // The service sets these three to 0 when they are missing.
+                'database_limit' => $server->database_limit,
+                'allocation_limit' => $server->allocation_limit,
+                'backup_limit' => $server->backup_limit,
+            ]);
+            echo 'ok', PHP_EOL;
+            break;
+
+        case 'server:show':
+            $server = Server::query()->where('uuid', $argv[2])->firstOrFail();
+            foreach (['memory', 'swap', 'disk', 'io', 'cpu', 'threads', 'oom_killer'] as $key) {
+                $value = $server->{$key};
+                if (is_bool($value)) {
+                    $value = $value ? 'true' : 'false';
+                }
+                echo $key, '=', $value ?? '', PHP_EOL;
+            }
             break;
 
         default:
@@ -639,7 +737,7 @@ $(sed 's/^/   /' "$INSTALL_DIR/pull.log")
       curl -sSI https://ghcr.io/v2/ | head -1
     Ask the network administrator to allow ghcr.io.
 
- 3. The container has no DNS. Read part 11 of the README.
+ 3. The container has no DNS. Read part 12 of the README.
 
 EOF
     exit 1
@@ -902,9 +1000,18 @@ create_server() {
     log "Make the Minecraft server. Wings now downloads Paper."
     SERVER_UUID="$(pboot server:create "$NODE_ID" "$EGG_ID" "$ADMIN_EMAIL" \
         "$MC_SERVER_NAME" "$MC_PORT" "$RCON_PORT" "$MC_MEMORY_MB" "$MC_DISK_MB" \
-        "$MC_VERSION" "$MC_JAVA_IMAGE" | tail -1)"
+        "$MC_VERSION" "$MC_JAVA_IMAGE" "$MC_IO_WEIGHT" | tail -1)"
     [ -n "$SERVER_UUID" ] || die "The server was not made."
     ok "The server has the identifier $SERVER_UUID."
+}
+
+# Put the resource limits on the server. On a second run, the server exists
+# already, and this step gives it the limits of the machine as it is now.
+apply_limits() {
+    log "Apply the resource limits to the server."
+    pboot server:build "$SERVER_UUID" "$MC_MEMORY_MB" "$MC_DISK_MB" "$MC_IO_WEIGHT" >/dev/null \
+        || die "The limits were not applied."
+    ok "Memory ${MC_MEMORY_MB} MB, disk $([ "$MC_DISK_MB" -eq 0 ] && echo 'no limit' || echo "${MC_DISK_MB} MB"), CPU no limit, IO weight ${MC_IO_WEIGHT}."
 }
 
 wait_for_install() {
@@ -1028,7 +1135,15 @@ prepare_server_files() {
     ok "The plugin and the accounts are in place."
 
     log "Set offline mode and the console."
-    RCON_PASSWORD="$(random_secret 24)"
+    # On a second run, keep the password of the same server. A running server
+    # reads server.properties only when it starts, so a new password here
+    # would lock the script out until the next restart.
+    RCON_PASSWORD=""
+    if [ -f "$INSTALL_DIR/secrets/rcon.env" ] \
+       && grep -q "^SERVER_UUID=${SERVER_UUID}$" "$INSTALL_DIR/secrets/rcon.env"; then
+        RCON_PASSWORD="$(awk -F= '$1 == "RCON_PASSWORD" {print $2}' "$INSTALL_DIR/secrets/rcon.env")"
+    fi
+    [ -n "$RCON_PASSWORD" ] || RCON_PASSWORD="$(random_secret 24)"
     local props="$srv/server.properties"
     touch "$props"
     set_prop "$props" online-mode false
@@ -1056,8 +1171,10 @@ prepare_server_files() {
 }
 
 start_server() {
+    # "restart" starts a stopped server, and restarts a running one. On a
+    # second run, the restart loads the new limits, the plugin and the files.
     log "Start the Minecraft server."
-    pboot server:power "$SERVER_UUID" start >/dev/null || die "The start failed."
+    pboot server:power "$SERVER_UUID" restart >/dev/null || die "The start failed."
 }
 
 wait_for_minecraft() {
@@ -1129,6 +1246,8 @@ DIR="$INSTALL_DIR"
 PANEL_CONTAINER="$PANEL_CONTAINER"
 BOOT="$BOOT"
 WINGS_DATA="$WINGS_DATA"
+MEMORY_RESERVE_MB="$MEMORY_RESERVE_MB"
+MC_IO_WEIGHT="$MC_IO_WEIGHT"
 EOF
     cat >> /usr/local/bin/mcadmin <<'EOF'
 CSV="$DIR/secrets/comptes-eleves.csv"
@@ -1151,6 +1270,11 @@ mcadmin — manage the school game server
     mcadmin wings <start|stop|restart|status|logs>
     mcadmin admin                   Show the panel administrator account
     mcadmin status                  Show the state of everything
+
+  RESOURCES
+    mcadmin resources               Show the limits and the live use
+    mcadmin resize [auto|<MB>]      Give the server all the memory (auto),
+                                    or a number of MB. Then it restarts.
 
   STUDENT ACCOUNTS
     mcadmin accounts                Show the account list
@@ -1180,6 +1304,64 @@ load_rcon() {
 rcon_run() { load_rcon; "$RCON" 127.0.0.1 "$RCON_PORT" "$RCON_PASSWORD" "$@"; }
 pboot()    { docker exec -i "$PANEL_CONTAINER" php "$BOOT" "$@"; }
 power()    { load_rcon; pboot server:power "$SERVER_UUID" "$1"; }
+
+# The same rule as Wings: +15 % up to 2048 MB, +10 % up to 4096 MB, +5 % above.
+container_mb() {
+    local m="$1"
+    if   [ "$m" -le 2048 ]; then echo $(( m * 115 / 100 ))
+    elif [ "$m" -le 4096 ]; then echo $(( m * 110 / 100 ))
+    else                          echo $(( m * 105 / 100 ))
+    fi
+}
+
+auto_memory() {
+    local total avail m
+    total="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
+    avail=$(( total - MEMORY_RESERVE_MB ))
+    m=$(( avail * 100 / 105 ))
+    [ "$m" -gt 4096 ] || m=$(( avail * 100 / 110 ))
+    [ "$m" -gt 2048 ] || m=$(( avail * 100 / 115 ))
+    echo "$m"
+}
+
+show_resources() {
+    load_rcon
+    local total avail cores
+    total="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
+    avail="$(awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo)"
+    cores="$(nproc)"
+
+    echo "=== Machine ==="
+    echo "  Memory      : ${total} MB total, ${avail} MB available now"
+    echo "  CPU cores   : ${cores}"
+    echo "  Disk        : $(df -Pm "$WINGS_DATA" | awk 'NR==2 {print $4 " MB free of " $2 " MB"}')"
+    echo
+
+    echo "=== Game server, in the panel ==="
+    pboot server:show "$SERVER_UUID" | sed 's/^/  /'
+    echo
+
+    echo "=== Game server, the real Docker container ==="
+    if docker inspect "$SERVER_UUID" >/dev/null 2>&1; then
+        docker inspect "$SERVER_UUID" --format \
+'  Memory limit: {{.HostConfig.Memory}} bytes
+  CPU quota   : {{.HostConfig.CpuQuota}}  (0 or -1 = no limit)
+  CPU set     : "{{.HostConfig.CpusetCpus}}"  (empty = all cores)
+  PID limit   : {{.HostConfig.PidsLimit}}
+  IO weight   : {{.HostConfig.BlkioWeight}}' \
+        | awk '/Memory limit/ {printf "  Memory limit: %d MB\n", $3/1048576; next} {print}'
+    else
+        echo "  The container does not exist. Is the server stopped?"
+    fi
+    echo
+
+    echo "=== Live use ==="
+    docker stats --no-stream --format \
+        'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}' 2>/dev/null \
+        | sed "s/$SERVER_UUID/minecraft ($SERVER_UUID)/"
+    echo
+    echo "Java uses up to 95 % of the container memory (-XX:MaxRAMPercentage=95)."
+}
 
 salt16() {
     local s=""
@@ -1249,6 +1431,20 @@ case "${1:-}" in
       if [ -f "$RCONF" ]; then load_rcon; pboot server:status "$SERVER_UUID"; fi
       ;;
 
+  resources) show_resources ;;
+  resize)
+      load_rcon
+      MEM="${2:-auto}"
+      [ "$MEM" = "auto" ] && MEM="$(auto_memory)"
+      case "$MEM" in ''|*[!0-9]*) echo "Use: mcadmin resize [auto|<MB>]"; exit 1 ;; esac
+      [ "$MEM" -ge 1024 ] || { echo "Too small: ${MEM} MB. The minimum is 1024 MB."; exit 1; }
+      DISK="$(pboot server:show "$SERVER_UUID" | awk -F= '$1 == "disk" {print $2}')"
+      pboot server:build "$SERVER_UUID" "$MEM" "${DISK:-0}" "$MC_IO_WEIGHT" >/dev/null
+      echo "The server gets ${MEM} MB (container $(container_mb "$MEM") MB)."
+      echo "Java reads its limit at the start. Restart of the server..."
+      power restart >/dev/null
+      echo "Done. Check with: mcadmin resources"
+      ;;
   accounts) column -s, -t < "$CSV" 2>/dev/null || cat "$CSV" ;;
   sync)     sync_accounts; echo "The accounts are rebuilt from $CSV." ;;
   add)
@@ -1342,6 +1538,7 @@ ${C_OK}===============================================================${C_OFF}
 
  Useful commands:
    mcadmin status         Show the state of everything
+   mcadmin resources      Show the CPU, memory and disk of the server
    mcadmin accounts       Show the account list
    mcadmin console "say bonjour"
    mcadmin admin          Show the panel login
@@ -1385,6 +1582,7 @@ main() {
     create_allocations
     create_server
     wait_for_install
+    apply_limits
 
     prepare_server_files
     verify_accounts
