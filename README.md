@@ -9,6 +9,10 @@ sudo bash install.sh
 When the script stops, the Minecraft server runs, the web panel works, and
 the 50 student accounts are registered. **No step in a browser.**
 
+> **Simple alternative:** `sudo bash simple.sh` installs only Docker and one
+> Minecraft container (no Pelican, no Portainer). The server does not depend on
+> the IP address of the machine. See [SIMPLE.md](SIMPLE.md).
+
 ---
 
 ## 1. What you get
